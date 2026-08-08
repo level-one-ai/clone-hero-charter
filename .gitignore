@@ -1,0 +1,13 @@
+node_modules/
+.next/
+out/
+build/
+*.tsbuildinfo
+next-env.d.ts
+
+# Local song projects — never commit user media
+/data/
+
+.env
+.env.local
+.DS_Store
