@@ -23,9 +23,16 @@ interface Props {
   dispatch: React.Dispatch<EditorAction>;
   /** Called after album art is replaced, so the parent can refresh its preview. */
   onAlbumChanged: (filename: string) => void;
+  /** Opens the MIDI re-import dialog, owned by the editor shell. */
+  onRequestReimport: () => void;
 }
 
-export default function SongPropertiesPanel({ project, dispatch, onAlbumChanged }: Props) {
+export default function SongPropertiesPanel({
+  project,
+  dispatch,
+  onAlbumChanged,
+  onRequestReimport,
+}: Props) {
   const { meta } = project;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -172,6 +179,19 @@ export default function SongPropertiesPanel({ project, dispatch, onAlbumChanged 
         <p className="mt-2 text-2xs text-faint">
           PNG or JPG, square works best. Packaged as album.png or album.jpg — Clone Hero
           reads either.
+        </p>
+      </section>
+
+      {/* ---- Re-import ------------------------------------------------------- */}
+      <section className="border-t border-edge p-3">
+        <h3 className="mb-2 text-2xs uppercase tracking-widest text-muted">Source MIDI</h3>
+        <button type="button" className="ch-button w-full" onClick={onRequestReimport}>
+          Re-import from MIDI
+        </button>
+        <p className="mt-2 text-2xs text-faint">
+          Chart MIDIs do not reliably name their guitar track, so the importer has to
+          guess. Use this to pick the track by hand if it chose the wrong part, or if a
+          difficulty came in empty.
         </p>
       </section>
     </div>

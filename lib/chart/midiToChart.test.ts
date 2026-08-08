@@ -142,11 +142,92 @@ describe('midiToChart', () => {
     expect(midiToChart(buildReferenceMidi(), 'id').report.octaveOffset).toBe(0);
   });
 
-  it('falls back to the densest track when no standard name is present', () => {
+  it('picks the right track by note layout when no standard name is present', () => {
     const { report } = midiToChart(buildReferenceMidi({ trackName: 'Lead Gtr' }), 'id');
     expect(report.selectedTrack).toBe('Lead Gtr');
-    expect(report.selectionReason).toContain('fell back');
+    // Chosen because its notes fit the chart layout, not because it merely had the
+    // most notes — a bass or drum part could win a raw density contest.
+    expect(report.selectionReason).toContain('best match the chart layout');
     expect(report.warnings.some((w) => w.includes('PART GUITAR'))).toBe(true);
+    expect(report.notesPerDifficulty.Expert).toBeGreaterThan(0);
+  });
+
+  it('reports a chart-fit score per track', () => {
+    const { report } = midiToChart(buildReferenceMidi(), 'id');
+    const guitar = report.trackSummaries.find((t) => t.name === 'PART GUITAR')!;
+    // Every note in the reference track is a valid chart note.
+    expect(guitar.chartFit).toBe(1);
+    expect(guitar.offset).toBe(0);
+  });
+
+  it('prefers a chart track over a denser track of ordinary music', () => {
+    // The trap the old "most notes in range" heuristic fell into: a music track with
+    // more notes than the chart track would win and produce a garbage import.
+    const midi = new Midi();
+    const headerJson = midi.header.toJSON();
+    headerJson.ppq = 480;
+    midi.header.fromJSON(headerJson);
+    midi.header.setTempo(120);
+
+    const music = midi.addTrack();
+    music.name = 'Piano';
+    for (let i = 0; i < 200; i += 1) {
+      // A chromatic run across the playable range — plausible music, invalid as a chart.
+      music.addNote({ midi: 60 + (i % 40), ticks: i * 120, durationTicks: 100 });
+    }
+
+    const chart = midi.addTrack();
+    chart.name = 'unnamed lead';
+    for (let i = 0; i < 40; i += 1) {
+      chart.addNote({ midi: 96 + (i % 5), ticks: i * 480, durationTicks: 50 });
+    }
+
+    const { report } = midiToChart(new Uint8Array(midi.toArray()), 'id');
+    expect(report.selectedTrack).toBe('unnamed lead');
+    expect(report.notesPerDifficulty.Expert).toBe(40);
+  });
+
+  it('matches a track whose name merely contains "guitar"', () => {
+    const { report } = midiToChart(buildReferenceMidi({ trackName: 'Guitar Expert' }), 'id');
+    expect(report.selectedTrack).toBe('Guitar Expert');
+    expect(report.selectionReason).toContain('contains "guitar"');
+  });
+
+  it('does not mistake Pro Guitar or GHL parts for the 5-fret lead', () => {
+    const midi = new Midi();
+    const headerJson = midi.header.toJSON();
+    headerJson.ppq = 480;
+    midi.header.fromJSON(headerJson);
+    midi.header.setTempo(120);
+
+    const pro = midi.addTrack();
+    pro.name = 'PART REAL_GUITAR';
+    for (let i = 0; i < 50; i += 1) pro.addNote({ midi: 40 + (i % 20), ticks: i * 240, durationTicks: 100 });
+
+    const lead = midi.addTrack();
+    lead.name = 'gtr';
+    for (let i = 0; i < 20; i += 1) lead.addNote({ midi: 96 + (i % 5), ticks: i * 480, durationTicks: 50 });
+
+    const { report } = midiToChart(new Uint8Array(midi.toArray()), 'id');
+    expect(report.selectedTrack).toBe('gtr');
+  });
+
+  it('says plainly when the file is ordinary music rather than a chart', () => {
+    const midi = new Midi();
+    const headerJson = midi.header.toJSON();
+    headerJson.ppq = 480;
+    midi.header.fromJSON(headerJson);
+    midi.header.setTempo(120);
+    const music = midi.addTrack();
+    music.name = 'Melody';
+    for (let i = 0; i < 100; i += 1) {
+      music.addNote({ midi: 55 + (i % 30), ticks: i * 240, durationTicks: 200 });
+    }
+
+    const { report } = midiToChart(new Uint8Array(midi.toArray()), 'id');
+    expect(
+      report.warnings.some((w) => w.includes('does not') || w.includes('do not match')),
+    ).toBe(true);
   });
 
   it('returns an empty chart rather than throwing on a note-free MIDI', () => {

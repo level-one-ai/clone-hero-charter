@@ -67,6 +67,48 @@ export function createSong(
   });
 }
 
+export interface ReimportTrackOption {
+  index: number;
+  name: string;
+  noteCount: number;
+  range: [number, number] | null;
+  /** 0-1 — how well this track's notes fit the Guitar Hero layout. */
+  chartFit: number;
+  offset: number;
+  notesPerDifficulty: Record<'Expert' | 'Hard' | 'Medium' | 'Easy', number>;
+}
+
+export interface ReimportAnalysis {
+  currentTrack: string;
+  selectionReason: string;
+  octaveOffset: number;
+  noteHistogram: Record<number, number>;
+  warnings: string[];
+  tracks: ReimportTrackOption[];
+}
+
+/** Analyse the project's stored source.mid without changing anything. */
+export async function analyzeReimport(id: string): Promise<ReimportAnalysis> {
+  return unwrap<ReimportAnalysis>(
+    await fetch(`/api/songs/${id}/reimport`, { cache: 'no-store' }),
+  );
+}
+
+/** Re-run the MIDI import with an explicit track and octave offset. Destructive. */
+export async function applyReimport(
+  id: string,
+  options: { trackIndex?: number; octaveOffset?: number },
+): Promise<Project> {
+  const body = await unwrap<{ project: Project }>(
+    await fetch(`/api/songs/${id}/reimport`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(options),
+    }),
+  );
+  return body.project;
+}
+
 export async function saveChart(id: string, project: Project): Promise<void> {
   await unwrap<{ ok: true }>(
     await fetch(`/api/songs/${id}/chart`, {

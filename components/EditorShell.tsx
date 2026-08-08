@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import ExportDialog from './ExportDialog';
 import NoteHighway from './NoteHighway';
+import ReimportDialog from './ReimportDialog';
 import SongPropertiesPanel from './SongPropertiesPanel';
 import SyncPanel from './SyncPanel';
 import TransportBar from './TransportBar';
@@ -51,6 +52,7 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
   const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [reimportOpen, setReimportOpen] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<'song' | 'sync'>('song');
   const [message, setMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
 
@@ -409,6 +411,7 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
                 onAlbumChanged={(filename) =>
                   setMessage({ kind: 'info', text: `Album art updated (${filename}).` })
                 }
+                onRequestReimport={() => setReimportOpen(true)}
               />
             ) : (
               <SyncPanel
@@ -439,6 +442,21 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
         exporting={exporting}
         onClose={() => setExportOpen(false)}
         onExport={(keepOriginalAudio) => void handleExport(keepOriginalAudio)}
+      />
+
+      <ReimportDialog
+        project={project}
+        open={reimportOpen}
+        onClose={() => setReimportOpen(false)}
+        onApplied={(updated) => {
+          // The server has already written this, so reset rather than marking dirty —
+          // otherwise the autosave would immediately write it straight back.
+          dispatch({ type: 'reset', project: updated });
+          setMessage({
+            kind: 'info',
+            text: `Re-imported: ${updated.tracks.ExpertSingle.notes.length} Expert notes.`,
+          });
+        }}
       />
     </div>
   );

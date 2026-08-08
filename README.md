@@ -263,6 +263,34 @@ Note 116 marks star power phrases and note 104 marks tap phrases; both are globa
 across difficulties. A uniform octave shift is detected and corrected automatically,
 with a warning.
 
+### Picking the guitar track
+
+Chart MIDIs are supposed to name the lead part `PART GUITAR`, but plenty do not — some
+name it something else, some leave tracks unnamed entirely. So the importer tries, in
+order:
+
+1. an exact standard name (`PART GUITAR`, `T1 GEMS`, …)
+2. any name containing "guitar", excluding Pro Guitar / GHL / bass / co-op parts
+3. **the track whose notes best fit the chart layout**, ignoring names entirely
+
+Step 3 is the one that rescues unnamed files. It scores each track on the fraction of
+its notes that land on valid chart note numbers — a real chart part scores ~100%, while
+ordinary music scores around 60% at best, since it scatters across the chromatic scale.
+Ties are broken by how many difficulties a track covers, because a finished guitar part
+spans several while a stray track usually occupies one.
+
+**When it still guesses wrong.** `PART DRUMS` uses the *same* note numbers as
+`PART GUITAR`, so in an unnamed file no heuristic can reliably tell them apart. If the
+wrong part was imported, or a difficulty came in empty, open the editor and use
+**Song → Re-import from MIDI**. It lists every track with its note counts and fit score
+and lets you pick by hand, or set an octave offset. Your audio, artwork and metadata are
+kept; only the notes and tempo map are replaced.
+
+If no track scores as a chart at all, the import says so plainly — that usually means
+the file is an ordinary song MIDI (a transcription or karaoke file) rather than a chart.
+Those contain musical pitches, not fret data, and cannot be imported. Upload the audio
+on its own and chart it by hand instead.
+
 Tempo and time-signature maps are imported from the MIDI header, and ticks are rescaled
 from the file's PPQ to the chart resolution of 192.
 

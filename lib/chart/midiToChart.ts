@@ -58,6 +58,99 @@ const TAP_NOTE = 104;
 /** Track names to look for, most preferred first. */
 const GUITAR_TRACK_NAMES = ['part guitar', 't1 gems', 'part guitar coop', 'part rhythm', 'guitar'];
 
+/**
+ * Track names that contain "guitar" but are NOT the standard 5-fret lead part.
+ * Matched before the fuzzy name pass so a file containing both PART REAL_GUITAR and
+ * an oddly-named lead track does not pick the Pro Guitar part.
+ */
+const NON_LEAD_HINTS = ['ghl', 'real', 'bass', 'coop', '22', 'pro'];
+
+/** Whole-octave shifts worth testing. Charting conventions shift by 12, never by 1. */
+const CANDIDATE_OFFSETS = [0, -12, 12, -24, 24];
+
+/** Is this note number meaningful in a Guitar Hero chart track? */
+function isChartNote(note: number): boolean {
+  if (note === STAR_POWER_NOTE || note === TAP_NOTE) return true;
+  // Other markers that legitimately appear in chart tracks. Counted as valid so a
+  // genuine chart is not penalised for carrying them.
+  if (note >= 120 && note <= 127) return true; // BRE / fill / tremolo / trill markers
+  for (const base of Object.values(DIFFICULTY_BASE)) {
+    const relative = note - base;
+    // base+0..4 frets, +5/+6 force flags, +7 open note.
+    if (relative >= 0 && relative <= 7) return true;
+  }
+  return false;
+}
+
+/**
+ * How much does this track look like a chart rather than music?
+ *
+ * Returns the fraction of notes landing on meaningful chart note numbers, at the
+ * best-fitting octave offset.
+ *
+ * This is the load-bearing heuristic. Matching on track NAMES alone is brittle —
+ * plenty of real charts have tracks named something other than PART GUITAR, or not
+ * named at all — whereas the note numbers cannot lie: a genuine chart track puts
+ * almost every note inside the four difficulty blocks, while an ordinary music track
+ * scatters across the chromatic scale and scores near zero. So we let the data decide
+ * when the name is unhelpful.
+ */
+function bestChartFit(notes: { midi: number }[]): { score: number; offset: number } {
+  if (notes.length === 0) return { score: 0, offset: 0 };
+  let best = { score: 0, offset: 0 };
+  for (const offset of CANDIDATE_OFFSETS) {
+    let valid = 0;
+    for (const note of notes) {
+      if (isChartNote(note.midi - offset)) valid += 1;
+    }
+    const score = valid / notes.length;
+    if (score > best.score) best = { score, offset };
+  }
+  return best;
+}
+
+/**
+ * How many of the four difficulty blocks does this track actually use?
+ *
+ * Used to break ties between tracks that score equally on chart fit — which happens
+ * routinely, because PART DRUMS uses the SAME note numbers as PART GUITAR (96-100 for
+ * Expert, and so on). Note numbers alone genuinely cannot tell those two apart.
+ *
+ * What does separate them in practice is coverage: a finished guitar part is charted
+ * across several difficulties, whereas a partial or stray track tends to occupy a
+ * single block. Preferring wider coverage beats preferring raw note count, which just
+ * picks whichever part happens to be busiest — often the drums.
+ *
+ * This is a tie-break, not a guarantee. When a file holds both a full guitar and a full
+ * drum chart and neither is named, no heuristic can choose correctly — which is exactly
+ * why the re-import track picker exists.
+ */
+function difficultyCoverage(notes: { midi: number }[], offset: number): number {
+  const blocks = new Set<string>();
+  for (const note of notes) {
+    const shifted = note.midi - offset;
+    for (const [difficulty, base] of Object.entries(DIFFICULTY_BASE)) {
+      const relative = shifted - base;
+      if (relative >= 0 && relative <= 7) {
+        blocks.add(difficulty);
+        break;
+      }
+    }
+  }
+  return blocks.size;
+}
+
+/**
+ * Below this, a track is not plausibly a chart part.
+ *
+ * Set high deliberately. The difficulty blocks span 8 of every 12 semitones, so an
+ * ordinary chromatic music track scores around 0.6 purely by chance — a "majority of
+ * notes are valid" test would wave almost anything through. A genuine chart track
+ * scores 1.0, because every note in it is meaningful by construction, so the gap
+ * between the two is wide and the threshold belongs near the top of it.
+ */
+const CHART_FIT_THRESHOLD = 0.85;
+
 // ---------------------------------------------------------------------------
 // Diagnostics
 // ---------------------------------------------------------------------------
@@ -68,6 +161,16 @@ export interface MidiTrackSummary {
   noteCount: number;
   /** Lowest and highest note numbers present, or null for an empty track. */
   range: [number, number] | null;
+  /**
+   * 0-1: fraction of notes landing on valid chart note numbers. Near 1 means a real
+   * chart part; near 0 means ordinary music. Shown in the UI so the right track is
+   * obvious when picking one by hand.
+   */
+  chartFit: number;
+  /** Octave offset at which chartFit was achieved. */
+  offset: number;
+  /** How many of the four difficulty blocks carry notes (0-4). */
+  difficultyCoverage: number;
 }
 
 export interface MidiImportReport {
@@ -165,11 +268,15 @@ export function midiToChart(
   // ---- track summaries (always computed, always reported) ----------------------
   const trackSummaries: MidiTrackSummary[] = midi.tracks.map((track, index) => {
     const numbers = track.notes.map((n) => n.midi);
+    const fit = bestChartFit(track.notes);
     return {
       index,
       name: track.name || `(unnamed track ${index})`,
       noteCount: track.notes.length,
       range: numbers.length > 0 ? [Math.min(...numbers), Math.max(...numbers)] : null,
+      chartFit: fit.score,
+      offset: fit.offset,
+      difficultyCoverage: difficultyCoverage(track.notes, fit.offset),
     };
   });
 
@@ -191,9 +298,53 @@ export function midiToChart(
     }
   }
 
+  // Second pass: a name merely CONTAINING "guitar", once the parts that are not the
+  // 5-fret lead (Pro Guitar, GHL, co-op, bass) have been ruled out. Catches real
+  // charts named things like "Guitar Expert" or "PART GUITAR X".
   if (selectedIndex < 0) {
-    // Fall back to whichever track has the most notes in the playable range. This is
-    // what rescues files from editors that name tracks something unexpected.
+    const found = midi.tracks.findIndex((t) => {
+      const name = (t.name || '').trim().toLowerCase();
+      if (!name.includes('guitar') || t.notes.length === 0) return false;
+      return !NON_LEAD_HINTS.some((hint) => name.includes(hint));
+    });
+    if (found >= 0) {
+      selectedIndex = found;
+      selectionReason = `track name contains "guitar" ("${midi.tracks[found].name}")`;
+    }
+  }
+
+  /**
+   * Third pass: ignore names entirely and pick the track whose NOTES look most like a
+   * chart. This is what handles unnamed tracks, which is the common case in charts
+   * exported by tools that drop track names — previously these fell through to a crude
+   * "most notes in range" guess that would happily pick a bass or drum part.
+   */
+  if (selectedIndex < 0) {
+    const ranked = trackSummaries
+      .filter((t) => t.noteCount > 0 && t.chartFit >= CHART_FIT_THRESHOLD)
+      // Best fit first, then widest difficulty coverage, then note count. Coverage
+      // matters more than density: a full guitar part spans several difficulties,
+      // while the busiest track in a file is often the drums.
+      .sort(
+        (a, b) =>
+          b.chartFit - a.chartFit ||
+          b.difficultyCoverage - a.difficultyCoverage ||
+          b.noteCount - a.noteCount,
+      );
+
+    if (ranked.length > 0) {
+      selectedIndex = ranked[0].index;
+      selectionReason = `no standard track name found; picked the track whose notes best match the chart layout (${Math.round(ranked[0].chartFit * 100)}% of notes are valid chart notes)`;
+      warnings.push(
+        `No track named PART GUITAR was found, so "${ranked[0].name}" was chosen because its notes match the Guitar Hero layout. Check the note counts below — if it picked the wrong part, use "Re-import from MIDI" in the editor's Song panel to choose a different track.`,
+      );
+    }
+  }
+
+  // Last resort: nothing scored as a chart at all. Take the densest track in the
+  // playable range so there is something to look at, and say plainly that this file
+  // does not appear to be a chart.
+  if (selectedIndex < 0) {
     let best = -1;
     let bestCount = 0;
     midi.tracks.forEach((track, index) => {
@@ -205,9 +356,9 @@ export function midiToChart(
     });
     if (best >= 0) {
       selectedIndex = best;
-      selectionReason = `no standard track name found; fell back to the track with the most notes in the playable range (${bestCount} notes)`;
+      selectionReason = `no track matched the chart layout; fell back to the densest track in the playable range (${bestCount} notes)`;
       warnings.push(
-        `No track named PART GUITAR was found. Charted from "${midi.tracks[best].name || `track ${best}`}" instead — check the note histogram below.`,
+        'No track in this file looks like a Guitar Hero chart — the note numbers do not match the fret layout. This is usually an ordinary music MIDI rather than a chart. You can still upload the audio on its own and chart it by hand.',
       );
     }
   }
@@ -242,7 +393,16 @@ export function midiToChart(
   }
 
   // ---- octave offset detection -------------------------------------------------
-  octaveOffset = options.octaveOffset ?? detectOctaveOffset(noteHistogram);
+  // Same scoring used to pick the track, now applied to choose its offset, so the two
+  // decisions can never disagree.
+  const selectedFit = bestChartFit(track.notes);
+  octaveOffset = options.octaveOffset ?? selectedFit.offset;
+
+  if (selectedFit.score < CHART_FIT_THRESHOLD) {
+    warnings.push(
+      `Only ${Math.round(selectedFit.score * 100)}% of the notes in "${track.name || `track ${selectedIndex}`}" are valid chart notes, so this is probably not a guitar chart track. Use "Re-import from MIDI" in the editor's Song panel to try another track.`,
+    );
+  }
   if (octaveOffset !== 0) {
     warnings.push(
       `Note numbers sit ${octaveOffset > 0 ? '+' : ''}${octaveOffset} semitones from the standard layout; applied that offset. Verify the imported notes before charting on top of them.`,
@@ -376,49 +536,6 @@ export function midiToChart(
       warnings,
     },
   };
-}
-
-/**
- * Detect a uniform semitone shift from the standard layout.
- *
- * Scores candidate offsets by how many notes land on a recognised value (a fret, a
- * flag, or the star power marker) and picks the best. Offset 0 wins ties so a
- * standard file is never "corrected".
- */
-function detectOctaveOffset(histogram: Record<number, number>): number {
-  const entries = Object.entries(histogram).map(([note, count]) => [Number(note), count] as const);
-  if (entries.length === 0) return 0;
-
-  const validForOffset = (offset: number): number => {
-    let score = 0;
-    for (const [note, count] of entries) {
-      const shifted = note - offset;
-      if (shifted === STAR_POWER_NOTE || shifted === TAP_NOTE) {
-        score += count;
-        continue;
-      }
-      for (const base of Object.values(DIFFICULTY_BASE)) {
-        const relative = shifted - base;
-        if (relative >= 0 && relative <= 7) {
-          score += count;
-          break;
-        }
-      }
-    }
-    return score;
-  };
-
-  let bestOffset = 0;
-  let bestScore = validForOffset(0);
-  // Only whole octaves are plausible — charting conventions shift by 12, not by 1.
-  for (const offset of [-24, -12, 12, 24]) {
-    const score = validForOffset(offset);
-    if (score > bestScore) {
-      bestScore = score;
-      bestOffset = offset;
-    }
-  }
-  return bestOffset;
 }
 
 function dedupeByTick<T extends { tick: number }>(items: T[]): T[] {
