@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "// start": "next.config sets output:'standalone', which `next start` does not support. The standalone bundle needs static/ and public/ copied beside it — the Dockerfile does the same COPY steps.",
+    "start": "cp -r public .next/standalone/ 2>/dev/null; cp -r .next/static .next/standalone/.next/ && node .next/standalone/server.js",
     "lint": "next lint",
     "test": "vitest run",
     "test:watch": "vitest",

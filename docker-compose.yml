@@ -1,0 +1,29 @@
+services:
+  charter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Coolify sets its own container naming; this only applies to local runs.
+    container_name: clone-hero-charter
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    environment:
+      # Must match the volume mount below. The app creates songs/ and tmp/ under it.
+      DATA_DIR: /data
+      NODE_ENV: production
+    volumes:
+      # A NAMED volume, not a bind mount: it is managed by Docker and survives
+      # `docker compose down`, image rebuilds and Coolify redeploys. A bind mount to
+      # a host path would work too, but named volumes are what Coolify's persistent
+      # storage UI creates, so this matches how it will actually be deployed.
+      - charter-data:/data
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3000/api/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  charter-data:
