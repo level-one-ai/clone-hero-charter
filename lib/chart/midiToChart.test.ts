@@ -212,7 +212,7 @@ describe('midiToChart', () => {
     expect(report.selectedTrack).toBe('gtr');
   });
 
-  it('says plainly when the file is ordinary music rather than a chart', () => {
+  function buildMusicalMidi(): Uint8Array {
     const midi = new Midi();
     const headerJson = midi.header.toJSON();
     headerJson.ppq = 480;
@@ -220,14 +220,53 @@ describe('midiToChart', () => {
     midi.header.setTempo(120);
     const music = midi.addTrack();
     music.name = 'Melody';
+    // Real pitches, as a transcription would carry — not fret assignments.
     for (let i = 0; i < 100; i += 1) {
       music.addNote({ midi: 55 + (i % 30), ticks: i * 240, durationTicks: 200 });
     }
+    return new Uint8Array(midi.toArray());
+  }
 
-    const { report } = midiToChart(new Uint8Array(midi.toArray()), 'id');
-    expect(
-      report.warnings.some((w) => w.includes('does not') || w.includes('do not match')),
-    ).toBe(true);
+  it('converts an ordinary music MIDI by mapping pitch to frets', () => {
+    const { project, report } = midiToChart(buildMusicalMidi(), 'id');
+    expect(report.musicalMode).toBe(true);
+    // The point of the fallback: a transcription still yields a usable chart rather
+    // than an empty one.
+    expect(report.notesPerDifficulty.Expert).toBeGreaterThan(0);
+    expect(project.tracks.ExpertSingle.notes.length).toBeGreaterThan(0);
+    for (const note of project.tracks.ExpertSingle.notes) {
+      expect(note.lane).toBeGreaterThanOrEqual(0);
+      expect(note.lane).toBeLessThanOrEqual(4);
+    }
+  });
+
+  it('says plainly that a converted file was a transcription, not a chart', () => {
+    const { report } = midiToChart(buildMusicalMidi(), 'id');
+    expect(report.warnings.some((w) => w.includes('transcription'))).toBe(true);
+  });
+
+  it('imports the tempo and time signature from a transcription', () => {
+    // The genuinely valuable part: the timing is exact even though the frets are guessed.
+    const { project } = midiToChart(buildMusicalMidi(), 'id');
+    expect(project.sync.bpms[0].bpm).toBeCloseTo(120, 2);
+    expect(project.sync.timeSignatures[0]).toEqual({ tick: 0, numerator: 4, denominator: 4 });
+  });
+
+  it('leaves the lower difficulties empty in musical mode', () => {
+    // Auto-thinned difficulties come out unmusical, so an empty one is more honest.
+    const { report } = midiToChart(buildMusicalMidi(), 'id');
+    expect(report.notesPerDifficulty.Hard).toBe(0);
+    expect(report.notesPerDifficulty.Medium).toBe(0);
+    expect(report.notesPerDifficulty.Easy).toBe(0);
+  });
+
+  it('does not treat a real chart as a transcription', () => {
+    expect(midiToChart(buildReferenceMidi(), 'id').report.musicalMode).toBe(false);
+  });
+
+  it('can be forced into musical mode for a chart file', () => {
+    const { report } = midiToChart(buildReferenceMidi(), 'id', { mode: 'musical' });
+    expect(report.musicalMode).toBe(true);
   });
 
   it('returns an empty chart rather than throwing on a note-free MIDI', () => {

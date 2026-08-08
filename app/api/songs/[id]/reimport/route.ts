@@ -81,6 +81,7 @@ export async function GET(_request: Request, { params }: Params) {
       currentTrack: auto.report.selectedTrack,
       selectionReason: auto.report.selectionReason,
       octaveOffset: auto.report.octaveOffset,
+      musicalMode: auto.report.musicalMode,
       noteHistogram: auto.report.noteHistogram,
       warnings: auto.report.warnings,
       tracks: previews,
@@ -110,7 +111,7 @@ export async function POST(request: Request, { params }: Params) {
   const existing = await readProject(id);
   if (!existing) return NextResponse.json({ error: 'Song not found' }, { status: 404 });
 
-  let body: { trackIndex?: number; octaveOffset?: number } = {};
+  let body: { trackIndex?: number; octaveOffset?: number; mode?: string } = {};
   try {
     body = ((await request.json()) ?? {}) as typeof body;
   } catch {
@@ -124,6 +125,11 @@ export async function POST(request: Request, { params }: Params) {
   const octaveOffset =
     typeof body.octaveOffset === 'number' && Number.isInteger(body.octaveOffset)
       ? Math.max(-48, Math.min(48, body.octaveOffset))
+      : undefined;
+
+  const mode =
+    body.mode === 'chart' || body.mode === 'musical' || body.mode === 'auto'
+      ? body.mode
       : undefined;
 
   const sourcePath = path.join(songDir(id), 'source.mid');
@@ -141,6 +147,7 @@ export async function POST(request: Request, { params }: Params) {
     const result = midiToChart(new Uint8Array(buffer), id, {
       trackIndex,
       octaveOffset,
+      mode,
       resolution: existing.resolution,
     });
     console.log(`[midi-reimport ${id}]\n${formatImportReport(result.report)}`);

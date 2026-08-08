@@ -78,10 +78,14 @@ export interface ReimportTrackOption {
   notesPerDifficulty: Record<'Expert' | 'Hard' | 'Medium' | 'Easy', number>;
 }
 
+export type ReimportMode = 'auto' | 'chart' | 'musical';
+
 export interface ReimportAnalysis {
   currentTrack: string;
   selectionReason: string;
   octaveOffset: number;
+  /** True when the file was read as a transcription and frets were derived. */
+  musicalMode: boolean;
   noteHistogram: Record<number, number>;
   warnings: string[];
   tracks: ReimportTrackOption[];
@@ -97,7 +101,7 @@ export async function analyzeReimport(id: string): Promise<ReimportAnalysis> {
 /** Re-run the MIDI import with an explicit track and octave offset. Destructive. */
 export async function applyReimport(
   id: string,
-  options: { trackIndex?: number; octaveOffset?: number },
+  options: { trackIndex?: number; octaveOffset?: number; mode?: ReimportMode },
 ): Promise<Project> {
   const body = await unwrap<{ project: Project }>(
     await fetch(`/api/songs/${id}/reimport`, {

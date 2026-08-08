@@ -6,6 +6,7 @@ import {
   analyzeReimport,
   applyReimport,
   type ReimportAnalysis,
+  type ReimportMode,
   type ReimportTrackOption,
 } from '@/lib/client/api';
 
@@ -41,6 +42,7 @@ export default function ReimportDialog({ project, open, onClose, onApplied }: Pr
   const [error, setError] = useState<string | null>(null);
   const [trackIndex, setTrackIndex] = useState<number | null>(null);
   const [octaveOffset, setOctaveOffset] = useState(0);
+  const [mode, setMode] = useState<ReimportMode>('auto');
   const [confirming, setConfirming] = useState(false);
 
   const load = useCallback(async () => {
@@ -94,6 +96,7 @@ export default function ReimportDialog({ project, open, onClose, onApplied }: Pr
       const updated = await applyReimport(project.id, {
         trackIndex: trackIndex ?? undefined,
         octaveOffset,
+        mode,
       });
       onApplied(updated);
       onClose();
@@ -142,6 +145,53 @@ export default function ReimportDialog({ project, open, onClose, onApplied }: Pr
                 &ldquo;Fit&rdquo; is how much of a track looks like chart data rather than music —
                 a real guitar part is at or near 100%.
               </p>
+
+              {analysis.musicalMode && (
+                <div className="mb-3 border border-lane-orange bg-bg p-3 text-2xs">
+                  <p className="text-lane-orange">This file is a transcription, not a chart.</p>
+                  <p className="mt-1 text-faint">
+                    Its note numbers are pitches rather than fret colours, so the frets were
+                    derived from the melody&apos;s shape. The timing and tempo are exact —
+                    treat the lanes as a starting point and adjust them for playability.
+                  </p>
+                </div>
+              )}
+
+              <div className="mb-4">
+                <span className="ch-label">Read the file as</span>
+                <div className="flex">
+                  {(
+                    [
+                      ['auto', 'Auto'],
+                      ['chart', 'Chart'],
+                      ['musical', 'Melody'],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => {
+                        setMode(value);
+                        setConfirming(false);
+                      }}
+                      className={`border px-3 py-1.5 text-2xs uppercase tracking-wide ${
+                        mode === value
+                          ? 'border-fg bg-fg text-bg'
+                          : 'border-edge2 bg-panel text-muted hover:text-fg'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-1 text-2xs text-faint">
+                  {mode === 'auto'
+                    ? 'Reads note numbers as frets when the track looks like a chart, and as pitches otherwise.'
+                    : mode === 'chart'
+                      ? 'Forces note numbers to be read as fret assignments. Use for a real chart the detector misread.'
+                      : 'Forces note numbers to be read as pitches, deriving frets from the melody. Use for a transcription of the song.'}
+                </p>
+              </div>
 
               <ul className="space-y-1">
                 {analysis.tracks.map((track) => (

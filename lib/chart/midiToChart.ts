@@ -11,6 +11,7 @@ import {
   type Project,
   type StarPowerPhrase,
 } from './types';
+import { assignLanesByContour, groupByTick } from './pitchToLanes';
 
 /**
  * MIDI -> chart conversion for Guitar Hero style .mid files.
@@ -187,6 +188,8 @@ export interface MidiImportReport {
   notesPerDifficulty: Record<Difficulty, number>;
   tempoCount: number;
   timeSignatureCount: number;
+  /** True when frets were derived from a melody rather than read as chart data. */
+  musicalMode: boolean;
   warnings: string[];
 }
 
@@ -195,7 +198,18 @@ export interface MidiImportResult {
   report: MidiImportReport;
 }
 
+/**
+ * How to interpret the MIDI.
+ *
+ *  chart   — note numbers are fret assignments (a real Guitar Hero chart)
+ *  musical — note numbers are pitches (a transcription); frets are derived from the
+ *            melody's contour
+ *  auto    — use chart mode when a track looks like a chart, otherwise musical
+ */
+export type MidiImportMode = 'auto' | 'chart' | 'musical';
+
 export interface MidiImportOptions {
+  mode?: MidiImportMode;
   resolution?: number;
   /**
    * Force a specific semitone offset instead of auto-detecting it. Use when the
@@ -283,10 +297,19 @@ export function midiToChart(
   // ---- pick the guitar track ---------------------------------------------------
   let selectedIndex = -1;
   let selectionReason = '';
+  const mode: MidiImportMode = options.mode ?? 'auto';
+  let musicalMode = mode === 'musical';
 
   if (options.trackIndex !== undefined && midi.tracks[options.trackIndex]) {
     selectedIndex = options.trackIndex;
     selectionReason = 'explicitly selected by the caller';
+    // An explicit track in auto mode still has to be interpreted correctly: a chosen
+    // track that does not use the fret layout is a transcription.
+    if (mode === 'auto') {
+      musicalMode = bestChartFit(midi.tracks[options.trackIndex].notes).score < CHART_FIT_THRESHOLD;
+    }
+  } else if (mode === 'musical') {
+    // Track chosen below, by note count rather than chart fit.
   } else {
     for (const wanted of GUITAR_TRACK_NAMES) {
       const found = midi.tracks.findIndex((t) => (t.name || '').trim().toLowerCase() === wanted);
@@ -341,25 +364,37 @@ export function midiToChart(
     }
   }
 
-  // Last resort: nothing scored as a chart at all. Take the densest track in the
-  // playable range so there is something to look at, and say plainly that this file
-  // does not appear to be a chart.
-  if (selectedIndex < 0) {
+  /**
+   * Nothing scored as a chart — so this is a transcription of the song, where the note
+   * numbers are pitches rather than fret assignments. Switch to musical mode and derive
+   * the frets from the melody's contour.
+   *
+   * Previously this fell back to "the densest track between notes 58 and 108", which
+   * reported "contains no note data at all" for any transcription written outside that
+   * window — a guitar part written at sounding pitch sits well below it — even when the
+   * file held hundreds of notes.
+   */
+  if (selectedIndex < 0 || mode === 'musical') {
     let best = -1;
     let bestCount = 0;
     midi.tracks.forEach((track, index) => {
-      const count = track.notes.filter((n) => n.midi >= 58 && n.midi <= 108).length;
-      if (count > bestCount) {
-        bestCount = count;
+      if (track.notes.length > bestCount) {
+        bestCount = track.notes.length;
         best = index;
       }
     });
     if (best >= 0) {
       selectedIndex = best;
-      selectionReason = `no track matched the chart layout; fell back to the densest track in the playable range (${bestCount} notes)`;
-      warnings.push(
-        'No track in this file looks like a Guitar Hero chart — the note numbers do not match the fret layout. This is usually an ordinary music MIDI rather than a chart. You can still upload the audio on its own and chart it by hand.',
-      );
+      musicalMode = true;
+      selectionReason =
+        mode === 'musical'
+          ? `musical mode: frets derived from the melody in "${midi.tracks[best].name || `track ${best}`}"`
+          : `no track uses the chart note layout, so this was read as a transcription; frets derived from the melody in "${midi.tracks[best].name || `track ${best}`}"`;
+      if (mode !== 'musical') {
+        warnings.push(
+          'This is a transcription of the song, not a Guitar Hero chart — its note numbers are pitches, not fret colours. The timing and tempo have been imported exactly, and the frets were derived from the melody, so treat the result as a starting point and adjust the lanes for playability.',
+        );
+      }
     }
   }
 
@@ -382,6 +417,7 @@ export function midiToChart(
         notesPerDifficulty,
         tempoCount: project.sync.bpms.length,
         timeSignatureCount: project.sync.timeSignatures.length,
+        musicalMode: false,
         warnings,
       },
     };
@@ -390,6 +426,59 @@ export function midiToChart(
   const track = midi.tracks[selectedIndex];
   for (const note of track.notes) {
     noteHistogram[note.midi] = (noteHistogram[note.midi] ?? 0) + 1;
+  }
+
+  // ---- musical mode: derive frets from the melody ------------------------------
+  if (musicalMode) {
+    // A quarter note, not the 1/12 step used when reading a real chart — see the note
+    // on sustainCutoff in pitchToLanes.
+    const sustainCutoff = resolution;
+    const groups = groupByTick(
+      track.notes.map((n) => ({
+        tick: toChartTick(n.ticks),
+        pitch: n.midi,
+        durationTicks: toChartTick(n.durationTicks),
+      })),
+    );
+    const assignments = assignLanesByContour(groups, { sustainCutoff, maxChordSize: 2 });
+
+    const notes: Note[] = [];
+    for (const assignment of assignments) {
+      for (const lane of assignment.lanes) {
+        notes.push({
+          id: newNoteId(),
+          tick: assignment.tick,
+          lane,
+          length: assignment.length,
+          forced: false,
+          tap: false,
+        });
+      }
+    }
+    notes.sort((a, b) => a.tick - b.tick || a.lane - b.lane);
+
+    // Expert only. Auto-thinned lower difficulties come out unmusical and need
+    // redoing anyway, so leaving them empty is more honest than filling them badly.
+    project.tracks.ExpertSingle = { notes, starPower: [] };
+    notesPerDifficulty.Expert = notes.length;
+
+    return {
+      project,
+      report: {
+        ppq,
+        resolution,
+        trackSummaries,
+        selectedTrack: track.name || `track ${selectedIndex}`,
+        selectionReason,
+        noteHistogram,
+        octaveOffset: 0,
+        notesPerDifficulty,
+        tempoCount: project.sync.bpms.length,
+        timeSignatureCount: project.sync.timeSignatures.length,
+        musicalMode: true,
+        warnings,
+      },
+    };
   }
 
   // ---- octave offset detection -------------------------------------------------
@@ -533,6 +622,7 @@ export function midiToChart(
       notesPerDifficulty,
       tempoCount: project.sync.bpms.length,
       timeSignatureCount: project.sync.timeSignatures.length,
+      musicalMode: false,
       warnings,
     },
   };

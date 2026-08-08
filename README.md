@@ -286,10 +286,35 @@ wrong part was imported, or a difficulty came in empty, open the editor and use
 and lets you pick by hand, or set an octave offset. Your audio, artwork and metadata are
 kept; only the notes and tempo map are replaced.
 
-If no track scores as a chart at all, the import says so plainly — that usually means
-the file is an ordinary song MIDI (a transcription or karaoke file) rather than a chart.
-Those contain musical pitches, not fret data, and cannot be imported. Upload the audio
-on its own and chart it by hand instead.
+### Transcriptions (ordinary song MIDIs)
+
+If no track scores as a chart, the file is a **transcription** — a MIDI of the actual
+music, where note 40 means E2 rather than "green". Plenty of guitar MIDIs found online
+are like this.
+
+These are still worth importing, because the hard part of charting is the timing, and a
+transcription already has it exactly. The importer switches to **melody mode**: it keeps
+the note timings, tempo map and time signatures verbatim, and derives the frets from the
+melody's contour —
+
+- same pitch → same fret
+- the line rises → move up the neck, further for a bigger interval
+- the line falls → move down
+- simultaneous notes → a chord on adjacent frets
+
+The result is a rhythmically exact Expert chart that you refine for playability, rather
+than 600 notes to place by hand. Two details that matter in practice: a pitch change
+always produces a fret change (otherwise you would be strumming one fret for what is
+audibly a different note), and sustains use a quarter-note threshold rather than the
+1/12 step used for real charts — transcriptions are written legato, so the shorter
+threshold turns ~80% of the chart into sustains.
+
+Lower difficulties are deliberately left empty. Auto-thinned ones come out unmusical and
+need redoing anyway.
+
+You can force either interpretation from **Song → Re-import from MIDI**, using the
+**Auto / Chart / Melody** switch — handy if a genuine chart gets misread, or if you want
+melody mapping applied to a file that happens to score as a chart.
 
 Tempo and time-signature maps are imported from the MIDI header, and ticks are rescaled
 from the file's PPQ to the chart resolution of 192.
