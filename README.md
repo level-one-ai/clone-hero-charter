@@ -10,26 +10,32 @@ No database — projects are plain folders on disk with a `songs.json` index.
 
 ## What it exports
 
-A zip containing exactly one folder, named `Artist - Title`, that drops straight into
-Clone Hero's `Songs/` directory:
+A zip containing exactly one folder, named `Artist - Title (Charter)` — the Clone Hero
+library convention — that drops straight into Clone Hero's `Songs/` directory:
 
 ```
-Artist - Title/
+ERRA - Gore of Being (enerbewow)/
   notes.chart     the chart
   song.ogg        the audio (transcoded from your upload)
-  album.png       cover art, if you supplied one
+  album.jpg       cover art, if you supplied one (.png also works)
   song.ini        metadata — this, not the chart, is what the song browser reads
 ```
+
+The charter's name identifies whose chart it is when several people have charted the
+same song. Set it on the New Song screen or in the editor's **Song** panel, which
+previews the exact folder name as you type. With no charter set, the parentheses are
+omitted entirely.
 
 **Platform note.** This targets Clone Hero on Windows, Mac, Linux, Android and Quest.
 Clone Hero does not run on Xbox 360. Xbox 360 customs are signed CON/STFS packages
 containing `.mid` + `.mogg` + a DTA file, built with a separate toolchain (C3 CON
 Tools and an RSA signing key) — this app does not produce them.
 
-**Audio format.** Exports transcode to OGG Vorbis, which is the community standard and
-roughly ten times smaller than a lossless WAV. Clone Hero also loads `.wav`, `.mp3` and
-`.opus`, so if ffmpeg is unavailable or cannot read your file, the export falls back to
-packaging the original audio and tells you it did.
+**Audio format.** Exports transcode to OGG Vorbis by default — the community standard,
+and roughly ten times smaller than a lossless WAV. Clone Hero also loads `.wav`, `.mp3`
+and `.opus`, so the export dialog has a **Keep the original audio** toggle when you'd
+rather ship `song.wav` untouched. If ffmpeg is unavailable or cannot read your file,
+the export falls back to the original audio and tells you it did.
 
 ---
 
@@ -136,6 +142,25 @@ on the next save.
 
 ---
 
+## Reading the highway
+
+Note types are distinguished by SHAPE, not just colour, so a chart stays readable
+while it scrolls — the same convention Moonscraper and the Guitar Hero games use:
+
+| Shape | Meaning |
+|---|---|
+| Wide gem | Strum — must be picked |
+| Narrow pill with a bright core | HOPO — hammer-on / pull-off, no pick needed |
+| Thin bar | Tap note |
+| Full-width purple bar | Open note |
+| Cyan tint, over a shaded band | Inside a star power phrase |
+
+HOPO status is **derived**, not stored: the `.chart` format only records the `forced`
+flag, which inverts the natural result. A note is a natural HOPO when it falls within a
+1/12 step of the previous note, on a different fret, and is not part of a chord. The
+highway shows what each note will actually *do* in game rather than which flag is set,
+so repeated notes on one fret correctly stay strums however close together they are.
+
 ## Editor controls
 
 | Input | Action |
@@ -159,6 +184,14 @@ on the next save.
 
 Edits autosave 1.5 seconds after you stop, and the tab warns before closing with
 unsaved changes.
+
+### Song properties
+
+The editor sidebar has two tabs. **Song** edits the title, artist, album, year, genre
+and charter, and replaces the album art — with a live preview of the export folder name,
+since three of those fields determine it. **Sync** holds the tempo map, time signatures
+and chart offset. Property edits go through the same undo history and autosave as note
+edits.
 
 ### Auto-detect BPM
 

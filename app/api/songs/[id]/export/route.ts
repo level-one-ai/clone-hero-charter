@@ -7,7 +7,7 @@ import { NextResponse } from 'next/server';
 import { generateSongIni } from '@/lib/chart/songIni';
 import { writeChart } from '@/lib/chart/writeChart';
 import { canTranscodeToOgg, hasFfmpeg, probeAudio, spawnOggTranscode } from '@/lib/server/audio';
-import { isValidSongId, sanitizeFilename, songDir, songFile } from '@/lib/server/paths';
+import { exportFolderName, isValidSongId, songDir, songFile } from '@/lib/server/paths';
 import { readProject } from '@/lib/server/storage';
 
 export const runtime = 'nodejs';
@@ -78,9 +78,8 @@ export async function POST(request: Request, { params }: Params) {
     durationMs = (await probeAudio(audioPath)).durationMs;
   }
 
-  const folderName = sanitizeFilename(
-    `${project.meta.artist || 'Unknown Artist'} - ${project.meta.name || 'Untitled'}`,
-  );
+  // "ERRA - Gore of Being (enerbewow)" — the Clone Hero library convention.
+  const folderName = exportFolderName(project.meta);
 
   const audioExt = path.extname(project.audio.file).toLowerCase();
   const alreadyOgg = audioExt === '.ogg';

@@ -68,21 +68,6 @@ export async function pathExists(target: string): Promise<boolean> {
   }
 }
 
-/**
- * Sanitize a string for use as a filename or zip folder name.
- * Clone Hero itself is tolerant, but Windows is not: <>:"/\|?* are illegal, and
- * trailing dots or spaces silently break folder creation.
- */
-export function sanitizeFilename(input: string, fallback = 'Untitled'): string {
-  // Illegal on Windows: < > : " / \ | ? * and any control character. Spaces and
-  // hyphens are deliberately kept — the export folder is named "Artist - Title".
-  const ILLEGAL = new Set(['<', '>', ':', '"', '/', '\\', '|', '?', '*']);
-  const cleaned = Array.from(input)
-    .filter((ch) => !ILLEGAL.has(ch) && ch.codePointAt(0)! >= 0x20)
-    .join('')
-    .replace(/\s+/g, ' ')
-    .trim()
-    // Windows silently mangles names ending in a dot or space.
-    .replace(/[. ]+$/, '');
-  return cleaned.length > 0 ? cleaned.slice(0, 120) : fallback;
-}
+// Naming lives in lib/chart/naming.ts so the browser can preview the export folder
+// name with the identical function the server uses to create it.
+export { exportFolderName, sanitizeFilename } from '../chart/naming';

@@ -2,7 +2,9 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import ExportDialog from './ExportDialog';
 import NoteHighway from './NoteHighway';
+import SongPropertiesPanel from './SongPropertiesPanel';
 import SyncPanel from './SyncPanel';
 import TransportBar from './TransportBar';
 import WaveformPanel, { type WaveformHandle } from './WaveformPanel';
@@ -48,6 +50,8 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
 
   const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [sidebarTab, setSidebarTab] = useState<'song' | 'sync'>('song');
   const [message, setMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
 
   const waveformRef = useRef<WaveformHandle | null>(null);
@@ -129,24 +133,28 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
 
   // ---- export ------------------------------------------------------------------
 
-  const handleExport = useCallback(async () => {
-    setExporting(true);
-    setMessage(null);
-    try {
-      // Export reads what is on disk, so flush pending edits first or the zip ships
-      // a chart one autosave behind what the user is looking at.
-      if (projectRef.current && dirty) await save();
-      const warnings = await exportSong(projectRef.current.id, false);
-      setMessage({
-        kind: warnings.length > 0 ? 'error' : 'info',
-        text: warnings.length > 0 ? warnings.join(' ') : 'Export downloaded.',
-      });
-    } catch (error) {
-      setMessage({ kind: 'error', text: `Export failed: ${(error as Error).message}` });
-    } finally {
-      setExporting(false);
-    }
-  }, [dirty, save]);
+  const handleExport = useCallback(
+    async (keepOriginalAudio: boolean) => {
+      setExporting(true);
+      setMessage(null);
+      try {
+        // Export reads what is on disk, so flush pending edits first or the zip ships
+        // a chart one autosave behind what the user is looking at.
+        if (projectRef.current && dirty) await save();
+        const warnings = await exportSong(projectRef.current.id, keepOriginalAudio);
+        setExportOpen(false);
+        setMessage({
+          kind: warnings.length > 0 ? 'error' : 'info',
+          text: warnings.length > 0 ? warnings.join(' ') : 'Export downloaded.',
+        });
+      } catch (error) {
+        setMessage({ kind: 'error', text: `Export failed: ${(error as Error).message}` });
+      } finally {
+        setExporting(false);
+      }
+    },
+    [dirty, save],
+  );
 
   // ---- BPM detection -----------------------------------------------------------
 
@@ -309,7 +317,7 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
         onTogglePlay={togglePlay}
         onSeek={handleSeek}
         onSave={() => void save()}
-        onExport={() => void handleExport()}
+        onExport={() => setExportOpen(true)}
         onUndo={() => dispatch({ type: 'undo' })}
         onRedo={() => dispatch({ type: 'redo' })}
         canUndo={state.past.length > 0}
@@ -379,15 +387,40 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
           />
         </div>
 
-        <aside className="w-72 shrink-0 overflow-y-auto border-l border-edge bg-panel">
-          <SyncPanel
-            project={project}
-            timing={timing}
-            playheadTick={playheadTick}
-            dispatch={dispatch}
-            onSeekToTick={(tick) => handleSeek(timing.tickToSec(tick))}
-            onDetectBpm={detectBpm}
-          />
+        <aside className="flex w-72 shrink-0 flex-col border-l border-edge bg-panel">
+          <nav className="flex shrink-0 border-b border-edge">
+            {(['song', 'sync'] as const).map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                onClick={() => setSidebarTab(tab)}
+                className={`ch-tab flex-1 ${sidebarTab === tab ? 'ch-tab-active' : ''}`}
+              >
+                {tab === 'song' ? 'Song' : 'Sync'}
+              </button>
+            ))}
+          </nav>
+
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {sidebarTab === 'song' ? (
+              <SongPropertiesPanel
+                project={project}
+                dispatch={dispatch}
+                onAlbumChanged={(filename) =>
+                  setMessage({ kind: 'info', text: `Album art updated (${filename}).` })
+                }
+              />
+            ) : (
+              <SyncPanel
+                project={project}
+                timing={timing}
+                playheadTick={playheadTick}
+                dispatch={dispatch}
+                onSeekToTick={(tick) => handleSeek(timing.tickToSec(tick))}
+                onDetectBpm={detectBpm}
+              />
+            )}
+          </div>
         </aside>
       </div>
 
@@ -399,6 +432,14 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
           T tap · Del remove · Space play
         </span>
       </footer>
+
+      <ExportDialog
+        project={project}
+        open={exportOpen}
+        exporting={exporting}
+        onClose={() => setExportOpen(false)}
+        onExport={(keepOriginalAudio) => void handleExport(keepOriginalAudio)}
+      />
     </div>
   );
 }

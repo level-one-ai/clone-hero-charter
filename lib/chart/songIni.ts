@@ -23,13 +23,25 @@ export function generateSongIni(project: Project, options: SongIniOptions): stri
 
   const lines: string[] = ['[song]'];
   const push = (key: string, value: string | number) => lines.push(`${key} = ${value}`);
+  /**
+   * Optional fields are omitted when empty rather than written blank. Clone Hero
+   * treats an absent key and an empty one identically, and `genre = ` in a file is
+   * just noise that makes real values harder to spot when reading it by hand.
+   */
+  const pushIfSet = (key: string, value: string | number | null | undefined) => {
+    if (value === null || value === undefined) return;
+    const text = String(value).trim();
+    if (text.length > 0) push(key, text);
+  };
 
-  push('name', meta.name || 'Untitled');
-  push('artist', meta.artist || 'Unknown Artist');
-  push('album', meta.album || '');
-  push('year', meta.year ?? '');
-  push('genre', meta.genre || '');
-  push('charter', meta.charter || 'Unknown');
+  push('name', meta.name.trim() || 'Untitled');
+  push('artist', meta.artist.trim() || 'Unknown Artist');
+  pushIfSet('album', meta.album);
+  pushIfSet('year', meta.year);
+  pushIfSet('genre', meta.genre);
+  push('charter', meta.charter.trim() || 'Unknown');
+  // Always emitted: this is the one field that changes playback, driving the progress
+  // bar and end-of-song detection.
   push('song_length', Math.max(0, Math.round(options.durationMs)));
 
   // Per-difficulty ratings, 0-6 in Clone Hero, or -1 for "not charted". We derive a
@@ -50,8 +62,8 @@ export function generateSongIni(project: Project, options: SongIniOptions): stri
   // Offset. We keep it at 0 and express any offset in the .chart, so there is exactly
   // one place where sync is adjusted.
   push('delay', 0);
-  push('icon', '');
-  push('loading_phrase', '');
+  // `icon` (charter badge) and `loading_phrase` are deliberately not written. Both are
+  // purely cosmetic, and an empty `icon` makes Clone Hero look for a missing badge.
 
   return `${lines.join('\n')}\n`;
 }
