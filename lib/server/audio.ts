@@ -117,6 +117,46 @@ export async function hasFfmpeg(): Promise<boolean> {
 }
 
 /**
+ * Pre-flight the transcode: can this ffmpeg actually decode this file AND encode
+ * Vorbis?
+ *
+ * This exists because of how a mid-stream failure plays out. The export streams the
+ * zip, so response headers (including the 200) are already sent by the time ffmpeg
+ * reports a problem. Aborting then hands the user a truncated, corrupt zip with a
+ * success status and no error message — the worst possible outcome.
+ *
+ * So we decode a fraction of a second up front and discard it. If that fails, the
+ * caller falls back to packaging the original audio with a visible warning. It costs
+ * one cheap subprocess and turns a silent corrupt download into a working export.
+ *
+ * `hasFfmpeg` alone is not enough: a stripped ffmpeg build can exist on PATH and
+ * still lack the WAV demuxer or the libvorbis encoder.
+ */
+export async function canTranscodeToOgg(inputPath: string): Promise<boolean> {
+  try {
+    await run('ffmpeg', [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-i',
+      inputPath,
+      '-vn',
+      '-t',
+      '0.1',
+      '-c:a',
+      'libvorbis',
+      '-f',
+      'ogg',
+      '-y',
+      process.platform === 'win32' ? 'NUL' : '/dev/null',
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Spawn ffmpeg to transcode to OGG Vorbis and return the child process so the caller
  * can pipe stdout straight into the zip archive.
  *

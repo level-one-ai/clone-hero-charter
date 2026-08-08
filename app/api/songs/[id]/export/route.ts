@@ -6,7 +6,7 @@ import { Readable } from 'node:stream';
 import { NextResponse } from 'next/server';
 import { generateSongIni } from '@/lib/chart/songIni';
 import { writeChart } from '@/lib/chart/writeChart';
-import { hasFfmpeg, probeAudio, spawnOggTranscode } from '@/lib/server/audio';
+import { canTranscodeToOgg, hasFfmpeg, probeAudio, spawnOggTranscode } from '@/lib/server/audio';
 import { isValidSongId, sanitizeFilename, songDir, songFile } from '@/lib/server/paths';
 import { readProject } from '@/lib/server/storage';
 
@@ -85,7 +85,10 @@ export async function POST(request: Request, { params }: Params) {
   const audioExt = path.extname(project.audio.file).toLowerCase();
   const alreadyOgg = audioExt === '.ogg';
   const wantTranscode = !keepOriginalAudio && !alreadyOgg;
-  const canTranscode = wantTranscode ? await hasFfmpeg() : false;
+  // Verified BEFORE the response starts streaming — see canTranscodeToOgg. Once the
+  // zip is streaming we can no longer change the status code, so a failure detected
+  // later can only produce a corrupt download.
+  const canTranscode = wantTranscode ? await canTranscodeToOgg(audioPath) : false;
 
   const archive = archiver('zip', {
     // Level 1: the payload is already-compressed audio, so heavier compression costs
@@ -95,7 +98,11 @@ export async function POST(request: Request, { params }: Params) {
 
   const warnings: string[] = [];
   if (wantTranscode && !canTranscode) {
-    warnings.push('ffmpeg is not available, so the original audio was packaged without transcoding.');
+    warnings.push(
+      (await hasFfmpeg())
+        ? 'ffmpeg could not convert this audio to OGG, so the original file was packaged instead. Clone Hero will still load it.'
+        : 'ffmpeg is not available, so the original audio was packaged without transcoding.',
+    );
   }
 
   // ---- notes.chart --------------------------------------------------------------
