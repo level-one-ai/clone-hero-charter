@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "// start": "next.config sets output:'standalone', which `next start` does not support. The standalone bundle needs static/ and public/ copied beside it — the Dockerfile does the same COPY steps.",
-    "start": "cp -r public .next/standalone/ 2>/dev/null; cp -r .next/static .next/standalone/.next/ && node .next/standalone/server.js",
+    "// start": "next.config sets output:'standalone', which `next start` does not support. The standalone bundle needs static/ and public/ copied beside it — the Dockerfile performs the same two copies as build steps. HOSTNAME is pinned because Docker sets it to the container id, which Next would then try to bind to instead of all interfaces.",
+    "start": "node scripts/start.mjs",
     "lint": "next lint",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -32,7 +32,6 @@
     "@types/react": "^19.0.7",
     "@types/react-dom": "^19.0.3",
     "autoprefixer": "^10.4.20",
-    "playwright": "^1.62.1",
     "postcss": "^8.5.1",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.3",

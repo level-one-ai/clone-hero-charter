@@ -1,0 +1,6 @@
+Keeps public/ tracked in git.
+
+The Dockerfile does `COPY --from=builder /app/public ./public`, matching the official
+Next.js standalone Dockerfile. Docker fails a COPY from a path that does not exist, so
+without this file the image cannot build at all. Any static assets added here are
+served from the site root and picked up by that COPY automatically.

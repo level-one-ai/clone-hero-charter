@@ -98,14 +98,25 @@ docker compose down && docker compose up -d
 ## Deploying with Coolify
 
 1. **New Resource → Application**, pointed at this Git repository.
-2. **Build Pack: Dockerfile.** Coolify picks up the `Dockerfile` at the repo root.
-3. **Port:** `3000`.
-4. **Persistent Storage:** add a volume mounted at `/data`. This is the important
-   step — without it, every redeploy destroys all your song projects, because the
-   container filesystem is recreated on each build.
-5. **Environment variables:** set `DATA_DIR=/data`. (The Dockerfile already defaults
-   to this, so it is belt-and-braces.)
+2. **Configuration → General → Build Pack: `Dockerfile`.**
+   This matters. **Nixpacks will not work**: it ignores the `Dockerfile` entirely, so
+   it installs no ffmpeg (exports silently fall back to the original audio) and none
+   of the environment below is applied — including the `HOSTNAME` pin, whose absence
+   produces a Bad Gateway. See the troubleshooting note below.
+3. **Ports Exposes:** `3000`.
+4. **Storages → + Add → Volume Mount:**
+   - Name: `charter-data`
+   - Destination Path: `/data`
+
+   Without this, every redeploy destroys all your song projects — the container
+   filesystem is recreated on each build. Either mount type works; the entrypoint
+   fixes ownership for bind mounts too.
+5. **Environment variables: none are required.** The Dockerfile sets `NODE_ENV`,
+   `PORT`, `HOSTNAME`, `DATA_DIR` and `NEXT_TELEMETRY_DISABLED`.
 6. Deploy.
+
+There are no API keys or tokens anywhere in this app — nothing calls an external
+service.
 
 ### Redeploying after a push
 
@@ -114,6 +125,36 @@ restarts automatically; otherwise press **Redeploy** in the Coolify UI.
 
 The `/data` volume is not touched by a rebuild, so **your song projects survive
 redeploys**. The container is replaced; the volume is not.
+
+### Troubleshooting: "Bad Gateway"
+
+If the domain returns a 502 while the container shows as running, the cause is almost
+always the `HOSTNAME` collision.
+
+Next's standalone server does `server.listen(port, process.env.HOSTNAME || '0.0.0.0')`,
+and **Docker sets `HOSTNAME` in every container** to the container's own hostname. Next
+then binds to that hostname instead of all interfaces — either failing outright with
+`ENOTFOUND`, or binding to a single container IP that the proxy is not routing to. The
+container looks perfectly healthy the whole time.
+
+The `Dockerfile` pins `ENV HOSTNAME=0.0.0.0` and `scripts/start.mjs` overrides it at
+runtime, so both paths are covered. But:
+
+- **Never set a `HOSTNAME` environment variable** to anything else. To bind to one
+  specific interface, use `BIND_HOST` instead.
+- If you switch to a build pack that skips the Dockerfile, set `HOSTNAME=0.0.0.0`
+  manually.
+
+To confirm the diagnosis, check the container logs. Healthy startup logs
+`- Network: http://0.0.0.0:3000`; the broken case logs `⨯ Failed to start server`.
+
+Other things worth checking, in order:
+
+| Symptom | Cause |
+|---|---|
+| `/api/health` returns 500 | `/data` is not writable, so the health check fails and the proxy drops the container |
+| `{"ffmpeg":false}` in `/api/health` | The Dockerfile build pack is not in use — exports will ship the original audio |
+| Build fails on `"/app/public": not found` | `public/` was deleted; it is tracked via `public/.gitkeep` for exactly this reason |
 
 ---
 

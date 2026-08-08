@@ -3,9 +3,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    # Coolify sets its own container naming; this only applies to local runs.
-    container_name: clone-hero-charter
     restart: unless-stopped
+    # LOCAL DEVELOPMENT ONLY. Publishing to the host is what lets you reach
+    # http://localhost:3000 from your own browser. On a PaaS behind a reverse proxy
+    # (Coolify/Traefik) this mapping must be removed — the proxy reaches the container
+    # over the Docker network, and a host binding can conflict or misroute.
+    # No container_name either: it breaks the platform's own container naming.
     ports:
       - '3000:3000'
     environment:
