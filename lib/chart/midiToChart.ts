@@ -135,9 +135,12 @@ export function midiToChart(
   const toChartTick = (midiTick: number) => Math.max(0, Math.round(midiTick * scale));
 
   // ---- tempo map ---------------------------------------------------------------
+  // MIDI stores tempo as microseconds per quarter note, so an authored 140 BPM comes
+  // back as 140.00014. The .chart format only carries three decimals, so rounding
+  // here loses nothing real and keeps the editor from showing phantom precision.
   const bpms = midi.header.tempos
     .filter((t) => Number.isFinite(t.bpm) && t.bpm > 0)
-    .map((t) => ({ tick: toChartTick(t.ticks), bpm: t.bpm }))
+    .map((t) => ({ tick: toChartTick(t.ticks), bpm: Math.round(t.bpm * 1000) / 1000 }))
     .sort((a, b) => a.tick - b.tick);
   if (bpms.length === 0 || bpms[0].tick !== 0) {
     bpms.unshift({ tick: 0, bpm: bpms[0]?.bpm ?? 120 });

@@ -1,0 +1,186 @@
+import archiver from 'archiver';
+import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import path from 'node:path';
+import { Readable } from 'node:stream';
+import { NextResponse } from 'next/server';
+import { generateSongIni } from '@/lib/chart/songIni';
+import { writeChart } from '@/lib/chart/writeChart';
+import { hasFfmpeg, probeAudio, spawnOggTranscode } from '@/lib/server/audio';
+import { isValidSongId, sanitizeFilename, songDir, songFile } from '@/lib/server/paths';
+import { readProject } from '@/lib/server/storage';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+interface Params {
+  params: Promise<{ id: string }>;
+}
+
+/**
+ * POST /api/songs/[id]/export — package a Clone Hero song folder as a zip.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT CLONE HERO ACTUALLY EXPECTS
+ * ---------------------------------------------------------------------------
+ * A song is a FOLDER (not an archive) inside Clone Hero's Songs directory,
+ * containing:
+ *
+ *     notes.chart   the chart          (notes.mid also works; .chart is ours)
+ *     song.ogg      the audio          (.mp3/.opus/.wav also load)
+ *     album.png     cover art          (optional, .jpg also works)
+ *     song.ini      metadata           (this, not the chart's [Song] block, is
+ *                                       what the in-game song browser reads)
+ *
+ * So the zip contains exactly one top-level folder named "Artist - Title", and the
+ * user extracts it straight into Songs/.
+ *
+ * AUDIO FORMAT DECISION: we transcode to OGG Vorbis by default. Clone Hero does load
+ * .wav, but a lossless WAV is roughly ten times the size of a q5 Vorbis file and the
+ * whole point of the export is a folder that is convenient to move around. Pass
+ * `keepOriginalAudio: true` to skip the transcode — and we fall back to the original
+ * automatically if ffmpeg is missing, rather than failing the export.
+ *
+ * PLATFORM NOTE: this produces a PC/Mac/Linux/Android Clone Hero folder. Clone Hero
+ * does not run on Xbox 360 — 360 customs are signed CON/STFS packages containing
+ * .mid + .mogg + DTA, which is a different toolchain entirely and not what this
+ * exports.
+ * ---------------------------------------------------------------------------
+ */
+export async function POST(request: Request, { params }: Params) {
+  const { id } = await params;
+  if (!isValidSongId(id)) return NextResponse.json({ error: 'Invalid song id' }, { status: 400 });
+
+  const project = await readProject(id);
+  if (!project) return NextResponse.json({ error: 'Song not found' }, { status: 404 });
+
+  let keepOriginalAudio = false;
+  try {
+    const body = (await request.json()) as { keepOriginalAudio?: boolean } | null;
+    keepOriginalAudio = Boolean(body?.keepOriginalAudio);
+  } catch {
+    // No body is fine — defaults apply.
+  }
+
+  const dir = songDir(id);
+  const audioPath = path.join(dir, project.audio.file);
+  if (!project.audio.file || !(await exists(audioPath))) {
+    return NextResponse.json(
+      { error: 'The project has no audio file, so it cannot be exported' },
+      { status: 400 },
+    );
+  }
+
+  // song_length must be accurate — Clone Hero uses it for the progress bar and for
+  // deciding when the song ends. Re-measure rather than trusting a stale value.
+  let durationMs = project.audio.durationMs;
+  if (!durationMs || durationMs <= 0) {
+    durationMs = (await probeAudio(audioPath)).durationMs;
+  }
+
+  const folderName = sanitizeFilename(
+    `${project.meta.artist || 'Unknown Artist'} - ${project.meta.name || 'Untitled'}`,
+  );
+
+  const audioExt = path.extname(project.audio.file).toLowerCase();
+  const alreadyOgg = audioExt === '.ogg';
+  const wantTranscode = !keepOriginalAudio && !alreadyOgg;
+  const canTranscode = wantTranscode ? await hasFfmpeg() : false;
+
+  const archive = archiver('zip', {
+    // Level 1: the payload is already-compressed audio, so heavier compression costs
+    // CPU and wall-clock for almost no size gain.
+    zlib: { level: 1 },
+  });
+
+  const warnings: string[] = [];
+  if (wantTranscode && !canTranscode) {
+    warnings.push('ffmpeg is not available, so the original audio was packaged without transcoding.');
+  }
+
+  // ---- notes.chart --------------------------------------------------------------
+  // Regenerated from the current project rather than reading notes.chart off disk,
+  // so an export can never ship a stale chart.
+  archive.append(writeChart(project), { name: `${folderName}/notes.chart` });
+
+  // ---- song.ini -----------------------------------------------------------------
+  archive.append(generateSongIni(project, { durationMs }), { name: `${folderName}/song.ini` });
+
+  // ---- audio --------------------------------------------------------------------
+  if (canTranscode) {
+    const ffmpeg = spawnOggTranscode(audioPath);
+    let stderr = '';
+    ffmpeg.stderr.on('data', (chunk) => {
+      stderr += String(chunk).slice(0, 2000);
+    });
+    ffmpeg.on('close', (code) => {
+      if (code !== 0) {
+        // Abort rather than shipping a truncated ogg, which the user would only
+        // discover when the song cuts out mid-play in game. Aborting breaks the
+        // response stream, so the download fails visibly instead of silently.
+        console.error(`[export ${id}] ffmpeg failed (${code}): ${stderr}`);
+        archive.abort();
+      }
+    });
+    ffmpeg.on('error', (error) => {
+      console.error(`[export ${id}] could not run ffmpeg:`, error);
+      archive.abort();
+    });
+    // Piped straight into the archive — a large WAV is never written to disk twice.
+    archive.append(ffmpeg.stdout, { name: `${folderName}/song.ogg` });
+  } else {
+    archive.append(fs.createReadStream(audioPath), {
+      name: `${folderName}/song${alreadyOgg ? '.ogg' : audioExt}`,
+    });
+  }
+
+  // ---- album art ----------------------------------------------------------------
+  if (project.album) {
+    try {
+      const albumPath = songFile(id, project.album);
+      if (await exists(albumPath)) {
+        // Clone Hero accepts album.png or album.jpg; keep whichever the user gave us
+        // rather than re-encoding and losing quality.
+        const ext = path.extname(project.album).toLowerCase() === '.png' ? '.png' : '.jpg';
+        archive.append(fs.createReadStream(albumPath), { name: `${folderName}/album${ext}` });
+      }
+    } catch {
+      warnings.push('Album art could not be read and was left out of the export.');
+    }
+  }
+
+  archive.on('warning', (error) => {
+    console.warn(`[export ${id}] archiver warning:`, error);
+  });
+  archive.on('error', (error) => {
+    console.error(`[export ${id}] archiver error:`, error);
+  });
+
+  void archive.finalize();
+
+  const filename = `${folderName}.zip`;
+  return new Response(Readable.toWeb(archive as unknown as Readable) as ReadableStream, {
+    headers: {
+      'Content-Type': 'application/zip',
+      // RFC 5987 filename* carries non-ASCII titles correctly; the plain filename is
+      // an ASCII-only fallback for older clients.
+      'Content-Disposition': `attachment; filename="${asciiFallback(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`,
+      'Cache-Control': 'no-store',
+      'X-Export-Warnings': warnings.length > 0 ? encodeURIComponent(warnings.join(' | ')) : '',
+    },
+  });
+}
+
+async function exists(target: string): Promise<boolean> {
+  try {
+    await fsp.access(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function asciiFallback(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  return name.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, '');
+}

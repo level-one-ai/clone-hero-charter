@@ -1,0 +1,102 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-bg text-fg font-sans antialiased;
+    /* The editor owns its own scrolling; the page itself never scrolls. */
+    overscroll-behavior: none;
+  }
+
+  /* Sharp, high-contrast focus ring — no glow, no shadow. */
+  :focus-visible {
+    outline: 1px solid #e5e5e5;
+    outline-offset: 1px;
+  }
+
+  ::selection {
+    background: #e5e5e5;
+    color: #0a0a0a;
+  }
+
+  /* Thin monochrome scrollbars, to match the DAW aesthetic. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #333333 transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: #333333;
+    border: 2px solid #0a0a0a;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background: #4a4a4a;
+  }
+
+  /* Number inputs: hide spinners, they look like toys next to sharp chrome. */
+  input[type='number']::-webkit-outer-spin-button,
+  input[type='number']::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type='number'] {
+    -moz-appearance: textfield;
+  }
+}
+
+@layer components {
+  /* Functional chrome: square, bordered, monochrome. */
+  .ch-button {
+    @apply inline-flex items-center justify-center gap-2 border border-edge2 bg-panel px-3 py-1.5
+           text-xs uppercase tracking-wide text-fg transition-colors
+           hover:bg-panel2 hover:border-faint
+           disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-panel;
+  }
+
+  .ch-button-primary {
+    @apply border-fg bg-fg text-bg hover:bg-white hover:text-bg;
+  }
+
+  .ch-button-danger {
+    @apply border-danger text-danger hover:bg-danger hover:text-bg;
+  }
+
+  .ch-input {
+    @apply w-full border border-edge2 bg-bg px-2 py-1.5 text-sm text-fg
+           placeholder:text-faint focus:border-fg focus:outline-none;
+  }
+
+  .ch-label {
+    @apply mb-1 block text-2xs uppercase tracking-widest text-muted;
+  }
+
+  .ch-panel {
+    @apply border border-edge bg-panel;
+  }
+
+  /* Tabs and toggles share one pressed/unpressed treatment. */
+  .ch-tab {
+    @apply border-b-2 border-transparent px-3 py-2 text-xs uppercase tracking-wide
+           text-muted transition-colors hover:text-fg;
+  }
+
+  .ch-tab-active {
+    @apply border-fg text-fg;
+  }
+}
