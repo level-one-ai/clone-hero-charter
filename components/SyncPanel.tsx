@@ -199,6 +199,52 @@ export default function SyncPanel({
         </ul>
       </section>
 
+      {/* ---- Lead-in -------------------------------------------------------- */}
+      <section className="border-b border-edge p-3">
+        <h3 className="mb-2 text-2xs uppercase tracking-widest text-muted">Lead-in silence</h3>
+        <div className="flex items-end gap-2">
+          <label className="flex-1">
+            <span className="ch-label">Seconds before the song starts</span>
+            <input
+              className="ch-input"
+              value={(project.meta.leadingSilenceMs ?? 0) / 1000}
+              inputMode="decimal"
+              onChange={(event) => {
+                const seconds = Number.parseFloat(event.target.value);
+                dispatch({
+                  type: 'setMeta',
+                  meta: {
+                    leadingSilenceMs: Number.isFinite(seconds)
+                      ? Math.max(0, Math.min(60, seconds)) * 1000
+                      : 0,
+                  },
+                });
+              }}
+            />
+          </label>
+          <div className="flex">
+            {[1, 2, 4].map((seconds) => (
+              <button
+                key={seconds}
+                type="button"
+                className="border border-edge2 bg-panel px-2 py-1.5 text-2xs text-muted hover:text-fg"
+                onClick={() =>
+                  dispatch({ type: 'setMeta', meta: { leadingSilenceMs: seconds * 1000 } })
+                }
+              >
+                {seconds}s
+              </button>
+            ))}
+          </div>
+        </div>
+        <p className="mt-1 text-2xs text-faint">
+          Adds real silence to the front of the exported audio, so the song starts a
+          little later and there is room to get your bearings. Nothing moves on the
+          highway &mdash; the chart&apos;s offset is adjusted to match, so it stays in
+          sync automatically.
+        </p>
+      </section>
+
       {/* ---- Offset -------------------------------------------------------- */}
       <section className="p-3">
         <h3 className="mb-2 text-2xs uppercase tracking-widest text-muted">Chart offset</h3>
@@ -215,8 +261,8 @@ export default function SyncPanel({
           />
         </label>
         <p className="mt-1 text-2xs text-faint">
-          Shifts the whole chart against the audio. Use this when every note is early or
-          late by the same amount, rather than moving notes.
+          Fine sync adjustment. Use this when every note is early or late by the same
+          amount, rather than moving notes.
         </p>
       </section>
     </div>

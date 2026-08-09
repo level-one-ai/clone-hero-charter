@@ -40,7 +40,12 @@ export type EditorAction =
   | { type: 'toggleFlag'; track: TrackName; ids: string[]; flag: 'forced' | 'tap' }
   | { type: 'setNotesLane'; track: TrackName; ids: string[]; lane: Lane }
   | { type: 'select'; ids: string[]; additive?: boolean }
+  | { type: 'selectAll'; track: TrackName }
   | { type: 'clearSelection' }
+  | { type: 'addStarPowerPhrase'; track: TrackName; tick: number; length: number }
+  | { type: 'deleteStarPowerPhrase'; track: TrackName; tick: number }
+  | { type: 'upsertEvent'; tick: number; text: string }
+  | { type: 'deleteEvent'; tick: number }
   | { type: 'upsertBpm'; marker: BpmMarker }
   | { type: 'deleteBpm'; tick: number }
   | { type: 'upsertTimeSignature'; marker: TimeSignature }
@@ -64,6 +69,7 @@ export function createEditorState(project: Project): EditorState {
 function isHistoryAction(action: EditorAction): boolean {
   switch (action.type) {
     case 'select':
+    case 'selectAll':
     case 'clearSelection':
     case 'undo':
     case 'redo':
@@ -92,6 +98,11 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
         else selection.add(id);
       }
       return { ...state, selection };
+    }
+
+    case 'selectAll': {
+      const ids = state.project.tracks[action.track].notes.map((n) => n.id);
+      return { ...state, selection: new Set(ids) };
     }
 
     case 'clearSelection':
@@ -243,6 +254,49 @@ function applyEdit(project: Project, action: EditorAction): Project {
       if (target.size === 0) return project;
       const notes = track.notes.map((n) => (target.has(n.id) ? { ...n, lane: action.lane } : n));
       return withTrack(project, action.track, sortNotes(dedupeNotes(notes, target)), track.starPower);
+    }
+
+    case 'addStarPowerPhrase': {
+      const track = project.tracks[action.track];
+      const tick = Math.max(0, Math.round(action.tick));
+      const length = Math.max(1, Math.round(action.length));
+      // Merge with any phrase this one touches. Overlapping star power phrases are
+      // invalid in Clone Hero, and silently producing them would only show up in game.
+      const overlapping = track.starPower.filter(
+        (p) => tick <= p.tick + p.length && p.tick <= tick + length,
+      );
+      const start = Math.min(tick, ...overlapping.map((p) => p.tick));
+      const end = Math.max(tick + length, ...overlapping.map((p) => p.tick + p.length));
+      const merged = { tick: start, length: end - start };
+      const kept = track.starPower.filter((p) => !overlapping.includes(p));
+      return withTrack(
+        project,
+        action.track,
+        track.notes,
+        [...kept, merged].sort((a, b) => a.tick - b.tick),
+      );
+    }
+
+    case 'deleteStarPowerPhrase': {
+      const track = project.tracks[action.track];
+      const starPower = track.starPower.filter((p) => p.tick !== action.tick);
+      if (starPower.length === track.starPower.length) return project;
+      return withTrack(project, action.track, track.notes, starPower);
+    }
+
+    case 'upsertEvent': {
+      const tick = Math.max(0, Math.round(action.tick));
+      const text = action.text.trim();
+      if (text.length === 0) return project;
+      const events = project.events.filter((e) => e.tick !== tick).concat({ tick, text });
+      events.sort((a, b) => a.tick - b.tick);
+      return { ...project, events };
+    }
+
+    case 'deleteEvent': {
+      const events = project.events.filter((e) => e.tick !== action.tick);
+      if (events.length === project.events.length) return project;
+      return { ...project, events };
     }
 
     case 'setStarPower': {

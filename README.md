@@ -220,11 +220,39 @@ so repeated notes on one fret correctly stay strums however close together they 
 | `Space` | Play / pause |
 | `Home` | Jump to the start |
 | Mouse wheel | Scrub the timeline (hold Shift to move faster) |
+| `Ctrl`/`Cmd` + `A` | Select everything in this difficulty |
+| `Alt` + `←` / `→` | Move the selection down or up a fret |
+| `P` | Star power phrase over the selection |
 | `Ctrl`/`Cmd` + `Z` / `Shift+Z` | Undo / redo |
 | `Ctrl`/`Cmd` + `S` | Save now |
 
+Every one of these is also a button on the note bar above the highway, and the full list
+is behind the **?** in the transport bar.
+
 Edits autosave 1.5 seconds after you stop, and the tab warns before closing with
 unsaved changes.
+
+### Sections and star power
+
+The **Chart** tab holds both. A section is added at the playhead with a name (or one of
+the presets), and appears on the highway as a gold line with its name in the gutter.
+Sections are written to the chart as `section <name>` events, which is what Clone Hero
+reads for its practice-mode list — they are what makes a long chart navigable.
+
+Star power phrases are per difficulty. Select the notes a phrase should cover and press
+**Star power** on the note bar (or `P`); the phrase spans from the first selected note to
+the end of the last. Overlapping phrases are merged automatically, since Clone Hero does
+not accept them.
+
+### Lead-in silence
+
+Under **Sync**. Adds real silence to the front of the exported audio so the song starts a
+little later, giving you room to get your bearings before the first note.
+
+Nothing moves on the highway. The silence is added to the audio with ffmpeg at export
+time, and the chart's `Offset` is increased to match, so the two stay in step
+automatically and `song_length` accounts for it. midi-ch has the same setting but leaves
+padding the audio to you in a DAW.
 
 ### Song properties
 
@@ -296,8 +324,7 @@ These are still worth importing, because the hard part of charting is the timing
 transcription already has it exactly. The importer keeps the note timings, tempo map and
 time signatures verbatim, and derives the frets from the pitches.
 
-**By pitch (the default).** Low pitches take green, high pitches take orange, and a
-given pitch always produces the same fret wherever it appears. Every note of a chord is
+**By pitch (the default).** Low pitches take green, high pitches take orange. Every note of a chord is
 mapped by its own pitch, so a chord's shape on the fretboard mirrors its shape in the
 music. The mapping is monotonic: a higher pitch never lands on a lower fret.
 
@@ -310,13 +337,23 @@ not evenly spread across their range:
 
 | Split | Behaviour |
 |---|---|
-| **Balanced** (default) | Boundaries placed so each fret gets a similar share of the notes |
+| **Local** (default) | Ranks each pitch against only the notes played around it |
+| **Balanced** | One mapping for the whole song, with boundaries placed so each fret gets a similar share of the notes |
 | **By pitch count** | Equal numbers of distinct pitches per fret |
 | **Even split** | Equal slices of the pitch range — most literal |
 
-An even split is the most faithful and often the least playable. On a riff camped on a
-few low notes it can put over half the song on green and leave blue almost unused;
-balanced keeps the pitch ordering while using the whole fretboard.
+The first three are progressively less literal and progressively more playable. An even
+split is the most faithful and often the worst to play: on a riff camped on a few low
+notes it can put over half the song on green and leave blue almost unused.
+
+**Local** is the approach [efhiii/midi-ch](https://github.com/EFHIII/midi-ch) takes, and
+it is the default here for the same reason. A single global mapping lets whichever
+section is busiest decide the boundaries for the entire song, so a quieter passage
+sitting a few semitones above it collapses onto one or two frets. Ranking within a
+rolling window means the frets describe "high or low *for this part of the song*", and
+every phrase spreads across the whole fretboard. On a real transcription this took
+orange from 4% of notes to 15%. The trade is that a given pitch can take different frets
+in different sections; the other splits keep it fixed.
 
 **By melody** is the alternative, chosen in the same dialog: the fret moves as the
 melody moves, up for a rise and down for a fall, further for a bigger interval. It

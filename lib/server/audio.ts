@@ -166,7 +166,35 @@ export async function canTranscodeToOgg(inputPath: string): Promise<boolean> {
  *
  * -q:a 5 is ~160kbps VBR, the quality level the Clone Hero community uses for customs.
  */
-export function spawnOggTranscode(inputPath: string) {
+export function spawnOggTranscode(inputPath: string, leadingSilenceMs = 0) {
+  return spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', ...transcodeArgs(inputPath, leadingSilenceMs)], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+/**
+ * ffmpeg arguments for the export transcode, optionally prepending silence.
+ *
+ * `adelay` shifts the audio later within the same stream rather than concatenating a
+ * separate silent file, which avoids any sample-rate or channel-layout mismatch
+ * between the two. `all=1` applies the delay to every channel — without it only the
+ * first channel is delayed and the result is audibly out of phase.
+ */
+function transcodeArgs(inputPath: string, leadingSilenceMs: number): string[] {
+  const args = ['-i', inputPath, '-vn']; // -vn drops embedded art, which would break the ogg
+  if (leadingSilenceMs > 0) {
+    args.push('-af', `adelay=${Math.round(leadingSilenceMs)}:all=1`);
+  }
+  args.push('-c:a', 'libvorbis', '-q:a', '5', '-f', 'ogg', 'pipe:1');
+  return args;
+}
+
+/**
+ * Prepend silence to an audio file without transcoding to OGG, for the
+ * keep-original-audio export path. Returns the child process so the caller can pipe
+ * stdout into the archive.
+ */
+export function spawnSilencePad(inputPath: string, leadingSilenceMs: number, format: string) {
   return spawn(
     'ffmpeg',
     [
@@ -175,13 +203,11 @@ export function spawnOggTranscode(inputPath: string) {
       'error',
       '-i',
       inputPath,
-      '-vn', // drop any embedded album art stream; it would break the ogg
-      '-c:a',
-      'libvorbis',
-      '-q:a',
-      '5',
+      '-vn',
+      '-af',
+      `adelay=${Math.round(leadingSilenceMs)}:all=1`,
       '-f',
-      'ogg',
+      format,
       'pipe:1',
     ],
     { stdio: ['ignore', 'pipe', 'pipe'] },

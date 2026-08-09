@@ -72,6 +72,8 @@ export const projectSchema = z.object({
     charter: z.string().max(120),
     mediaType: z.string().max(60),
     offset: z.number().min(-600).max(600),
+    // Up to a minute of lead-in; beyond that it is a mistake, not an intention.
+    leadingSilenceMs: z.number().min(0).max(60_000).default(0),
   }),
   resolution: z.number().int().min(1).max(19200),
   audio: z.object({

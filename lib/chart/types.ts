@@ -125,6 +125,19 @@ export interface SongMeta {
    * playback time — never inside the tick/beat math itself.
    */
   offset: number;
+  /**
+   * Silence to prepend to the audio, in milliseconds.
+   *
+   * Charting against a song that starts immediately is awkward: there is no room to
+   * get your bearings, and the first notes are hard to line up. Adding a lead-in
+   * shifts the whole song later without touching a single note.
+   *
+   * Non-destructive. The uploaded audio is never modified — the editor simply delays
+   * playback by this much so it previews the result, and the export prepends real
+   * silence with ffmpeg. midi-ch has the same setting but leaves padding the audio to
+   * you in a DAW; doing it here keeps chart and audio in step automatically.
+   */
+  leadingSilenceMs: number;
 }
 
 export interface AudioInfo {
@@ -201,6 +214,7 @@ export function createEmptyProject(id: string, meta: Partial<SongMeta> = {}): Pr
       charter: '',
       mediaType: 'cd',
       offset: 0,
+      leadingSilenceMs: 0,
       ...meta,
     },
     resolution: DEFAULT_RESOLUTION,

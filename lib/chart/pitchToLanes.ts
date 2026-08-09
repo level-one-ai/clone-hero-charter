@@ -204,10 +204,15 @@ export function groupByTick(
  *   distinct  equal numbers of DISTINCT pitches per band, ignoring how often each is
  *             played. A middle ground.
  */
-export type BandSplit = 'even' | 'balanced' | 'distinct';
+export type BandSplit = 'even' | 'balanced' | 'distinct' | 'local';
 
 export interface PitchMapOptions extends PitchMappingOptions {
   split?: BandSplit;
+  /**
+   * Window for the 'local' split, in ticks. Wider means fret assignments stay stable
+   * for longer; narrower means each phrase makes fuller use of the fretboard.
+   */
+  localWindowTicks?: number;
   /** Reserve the lowest pitch band for open notes, giving six bands instead of five. */
   useOpenNotes?: boolean;
   /** Flip the mapping so the highest pitches take green rather than orange. */
@@ -290,6 +295,64 @@ function bandOf(pitch: number, bounds: number[]): number {
 }
 
 /**
+ * Rank a pitch against only the pitches played AROUND it, rather than against the whole
+ * song.
+ *
+ * This is the idea behind efhiii/midi-ch, and it fixes the main weakness of a global
+ * mapping. Globally, one dominant section decides the band boundaries for the entire
+ * song, so a quiet passage sitting a few semitones above it collapses onto one or two
+ * frets and the outer frets go nearly unused. Ranking within a rolling window means
+ * every phrase spreads across the whole fretboard, because the frets describe "high or
+ * low FOR THIS PART OF THE SONG" instead of "high or low for the whole song".
+ *
+ * The cost is that a given pitch can take different frets in different sections. That
+ * is the trade: local mapping plays better, global mapping is more predictable.
+ */
+function localLaneResolver(
+  groups: PitchGroup[],
+  bandCount: number,
+  windowTicks: number,
+): (tick: number, pitch: number) => number {
+  // Flatten to (tick, pitch) pairs once; the window scan below is over this.
+  const events: Array<{ tick: number; pitch: number }> = [];
+  for (const group of groups) {
+    for (const pitch of group.pitches) events.push({ tick: group.tick, pitch });
+  }
+  events.sort((a, b) => a.tick - b.tick);
+
+  const lowerBound = (tick: number): number => {
+    let lo = 0;
+    let hi = events.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (events[mid].tick < tick) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+
+  return (tick: number, pitch: number): number => {
+    const from = lowerBound(tick - windowTicks);
+    const distinct = new Set<number>();
+    for (let i = from; i < events.length; i += 1) {
+      if (events[i].tick > tick + windowTicks) break;
+      distinct.add(events[i].pitch);
+    }
+
+    const ordered = [...distinct].sort((a, b) => a - b);
+    if (ordered.length <= 1) {
+      // Nothing to rank against — sit mid-fretboard rather than defaulting to an edge,
+      // so an isolated note does not read as the lowest or highest thing in the song.
+      return Math.floor(bandCount / 2);
+    }
+
+    const rank = ordered.indexOf(pitch);
+    // Spread the ranks across the available bands.
+    return Math.round((rank / (ordered.length - 1)) * (bandCount - 1));
+  };
+}
+
+/**
  * Map notes to frets by ABSOLUTE PITCH: low pitches to green, high pitches to orange,
  * with the same pitch always producing the same fret.
  *
@@ -323,10 +386,14 @@ export function assignLanesByPitch(
   }
 
   const bandCount = useOpenNotes ? 6 : 5;
-  const bounds = bandBoundaries(pitchCounts, bandCount, split);
+  const bounds = split === 'local' ? [] : bandBoundaries(pitchCounts, bandCount, split);
+  const localBand =
+    split === 'local'
+      ? localLaneResolver(sorted, bandCount, options.localWindowTicks ?? 192 * 8)
+      : null;
 
-  const laneForPitch = (pitch: number): Lane => {
-    let band = bandOf(pitch, bounds);
+  const laneForPitch = (pitch: number, tick: number): Lane => {
+    let band = localBand ? localBand(tick, pitch) : bandOf(pitch, bounds);
     if (invert) band = bandCount - 1 - band;
     if (useOpenNotes) {
       // Band 0 is the open note; the five frets sit above it.
@@ -343,7 +410,7 @@ export function assignLanesByPitch(
     // Every note of a chord is mapped by its own pitch — the same rule as single
     // notes, so a chord's shape on the fretboard mirrors its shape in the music.
     const uniquePitches = [...new Set(group.pitches)].sort((a, b) => a - b);
-    let lanes = [...new Set(uniquePitches.map(laneForPitch))];
+    let lanes = [...new Set(uniquePitches.map((pitch) => laneForPitch(pitch, group.tick)))];
 
     // An open note cannot be played together with frets, so when a chord spans the
     // boundary the frets win: they carry more of the chord's shape than the open does.

@@ -87,6 +87,8 @@ const COLORS = {
   /** Star power is cyan everywhere in the GH/CH lineage. */
   starPower: '#7fd8ff',
   marquee: 'rgba(229, 229, 229, 0.12)',
+  /** Section markers get their own colour so they read as structure, not timing. */
+  section: '#c9a227',
 } as const;
 
 /** HOPO threshold: a 1/12 step, which is `resolution / 3` ticks (64 at 192). */
@@ -519,6 +521,30 @@ function drawSyncMarkers(
     const y = Math.round(tickToYLocal(ts.tick)) + 0.5;
     ctx.fillStyle = COLORS.textDim;
     ctx.fillText(`${ts.numerator}/${ts.denominator}`, originX + highwayWidth + 62, y + 4);
+  }
+
+  // Section names, in the left gutter beside the measure numbers. Drawn as a solid
+  // line across the highway because a section boundary is a structural landmark — it
+  // should read at a glance while scrolling, unlike the dashed tempo markers.
+  for (const event of project.events) {
+    if (event.tick < bottomTick || event.tick > topTick) continue;
+    if (!event.text.startsWith('section ')) continue;
+    const y = Math.round(tickToYLocal(event.tick)) + 0.5;
+
+    ctx.strokeStyle = COLORS.section;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(originX, y);
+    ctx.lineTo(originX + highwayWidth, y);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+
+    ctx.fillStyle = COLORS.section;
+    ctx.font = '11px ui-sans-serif, system-ui, sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(event.text.slice('section '.length), originX - 34, y - 5);
+    ctx.textAlign = 'left';
+    ctx.font = '11px ui-monospace, monospace';
   }
 }
 

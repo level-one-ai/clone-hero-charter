@@ -6,7 +6,13 @@ import { Readable } from 'node:stream';
 import { NextResponse } from 'next/server';
 import { generateSongIni } from '@/lib/chart/songIni';
 import { writeChart } from '@/lib/chart/writeChart';
-import { canTranscodeToOgg, hasFfmpeg, probeAudio, spawnOggTranscode } from '@/lib/server/audio';
+import {
+  canTranscodeToOgg,
+  hasFfmpeg,
+  probeAudio,
+  spawnOggTranscode,
+  spawnSilencePad,
+} from '@/lib/server/audio';
 import { exportFolderName, isValidSongId, songDir, songFile } from '@/lib/server/paths';
 import { readProject } from '@/lib/server/storage';
 
@@ -77,6 +83,10 @@ export async function POST(request: Request, { params }: Params) {
   if (!durationMs || durationMs <= 0) {
     durationMs = (await probeAudio(audioPath)).durationMs;
   }
+  // Any lead-in silence is part of the packaged audio, so song_length has to include
+  // it or Clone Hero's progress bar and end-of-song detection are short by that much.
+  const leadingSilenceMs = Math.max(0, Math.round(project.meta.leadingSilenceMs ?? 0));
+  durationMs += leadingSilenceMs;
 
   // "ERRA - Gore of Being (enerbewow)" — the Clone Hero library convention.
   const folderName = exportFolderName(project.meta);
@@ -107,14 +117,24 @@ export async function POST(request: Request, { params }: Params) {
   // ---- notes.chart --------------------------------------------------------------
   // Regenerated from the current project rather than reading notes.chart off disk,
   // so an export can never ship a stale chart.
-  archive.append(writeChart(project), { name: `${folderName}/notes.chart` });
+  //
+  // Lead-in silence is expressed through the chart's Offset rather than by moving
+  // ticks. Offset delays the chart against the audio, which is exactly what padding
+  // the front of the audio requires — and it keeps every note, tempo marker and time
+  // signature where the editor put it. Shifting ticks instead would mean converting a
+  // duration to ticks through the tempo map, which is both lossy and needless.
+  const exportProject = {
+    ...project,
+    meta: { ...project.meta, offset: project.meta.offset + leadingSilenceMs / 1000 },
+  };
+  archive.append(writeChart(exportProject), { name: `${folderName}/notes.chart` });
 
   // ---- song.ini -----------------------------------------------------------------
-  archive.append(generateSongIni(project, { durationMs }), { name: `${folderName}/song.ini` });
+  archive.append(generateSongIni(exportProject, { durationMs }), { name: `${folderName}/song.ini` });
 
   // ---- audio --------------------------------------------------------------------
   if (canTranscode) {
-    const ffmpeg = spawnOggTranscode(audioPath);
+    const ffmpeg = spawnOggTranscode(audioPath, leadingSilenceMs);
     let stderr = '';
     ffmpeg.stderr.on('data', (chunk) => {
       stderr += String(chunk).slice(0, 2000);
@@ -134,7 +154,22 @@ export async function POST(request: Request, { params }: Params) {
     });
     // Piped straight into the archive — a large WAV is never written to disk twice.
     archive.append(ffmpeg.stdout, { name: `${folderName}/song.ogg` });
+  } else if (leadingSilenceMs > 0 && (await hasFfmpeg())) {
+    // Keeping the original format, but the lead-in still has to be baked in or the
+    // chart would be out of sync with the audio by exactly that much.
+    const format = audioExt.replace('.', '') || 'wav';
+    const padder = spawnSilencePad(audioPath, leadingSilenceMs, format);
+    padder.on('error', (error) => {
+      console.error(`[export ${id}] could not pad the audio:`, error);
+      archive.abort();
+    });
+    archive.append(padder.stdout, { name: `${folderName}/song${audioExt}` });
   } else {
+    if (leadingSilenceMs > 0) {
+      warnings.push(
+        'ffmpeg is not available, so the lead-in silence could not be added to the audio. The chart will be out of sync by that amount.',
+      );
+    }
     archive.append(fs.createReadStream(audioPath), {
       name: `${folderName}/song${alreadyOgg ? '.ogg' : audioExt}`,
     });

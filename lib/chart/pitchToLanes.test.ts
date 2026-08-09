@@ -276,3 +276,52 @@ describe('assignLanesByPitch', () => {
     expect(assignLanesByPitch([], OPTS)).toEqual([]);
   });
 });
+
+describe('local pitch mapping', () => {
+  it('uses the whole fretboard in each section, not just the loudest one', () => {
+    // Two sections in different registers. A global mapping lets the first decide the
+    // bands for the whole song, so the second collapses onto a couple of frets.
+    const notes: Array<{ tick: number; pitch: number; durationTicks: number }> = [];
+    let tick = 0;
+    for (let i = 0; i < 60; i += 1) {
+      notes.push({ tick: (tick += R), pitch: 40 + (i % 4), durationTicks: 0 });
+    }
+    for (let i = 0; i < 60; i += 1) {
+      notes.push({ tick: (tick += R), pitch: 70 + (i % 4), durationTicks: 0 });
+    }
+    const groups = groupByTick(notes);
+
+    const lanesIn = (result: ReturnType<typeof assignLanesByPitch>, from: number, to: number) =>
+      new Set(result.slice(from, to).flatMap((r) => r.lanes));
+
+    const global = assignLanesByPitch(groups, { ...OPTS, split: 'balanced', useOpenNotes: false });
+    const local = assignLanesByPitch(groups, { ...OPTS, split: 'local', useOpenNotes: false });
+
+    // The second section is where a global mapping runs out of frets.
+    expect(lanesIn(local, 60, 120).size).toBeGreaterThan(lanesIn(global, 60, 120).size);
+  });
+
+  it('still puts higher pitches on higher frets within a phrase', () => {
+    const groups = groupByTick(
+      [40, 45, 50, 55, 60].map((pitch, i) => ({ tick: i * R, pitch, durationTicks: 0 })),
+    );
+    const lanes = assignLanesByPitch(groups, {
+      ...OPTS,
+      split: 'local',
+      useOpenNotes: false,
+    }).map((r) => r.lanes[0]);
+    for (let i = 1; i < lanes.length; i += 1) {
+      expect(lanes[i]).toBeGreaterThanOrEqual(lanes[i - 1]);
+    }
+  });
+
+  it('places an isolated note mid-fretboard rather than at an edge', () => {
+    const lanes = assignLanesByPitch(groupByTick([{ tick: 0, pitch: 60, durationTicks: 0 }]), {
+      ...OPTS,
+      split: 'local',
+      useOpenNotes: false,
+    }).map((r) => r.lanes[0]);
+    expect(lanes[0]).toBeGreaterThan(0);
+    expect(lanes[0]).toBeLessThan(4);
+  });
+});

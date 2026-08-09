@@ -470,7 +470,7 @@ export function midiToChart(
           })
         : assignLanesByPitch(groups, {
             sustainCutoff,
-            split: melody.split ?? 'balanced',
+            split: melody.split ?? 'local',
             useOpenNotes: melody.useOpenNotes ?? true,
             invert: melody.invert ?? false,
             maxChordSize: melody.maxChordSize ?? 3,

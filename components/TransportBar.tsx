@@ -26,6 +26,7 @@ interface Props {
   dirty: boolean;
   saving: boolean;
   exporting: boolean;
+  onShowHelp: () => void;
 }
 
 const PLAYBACK_RATES = [0.25, 0.5, 0.75, 1];
@@ -51,6 +52,7 @@ export default function TransportBar({
   dirty,
   saving,
   exporting,
+  onShowHelp,
 }: Props) {
   return (
     <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-b border-edge bg-panel px-4 py-2">
@@ -82,7 +84,15 @@ export default function TransportBar({
         </select>
       </Control>
 
-      <Control label="Highway zoom">
+      <Control label="Zoom">
+        <button
+          type="button"
+          className="ch-button px-2"
+          onClick={() => onZoomChange(Math.max(0.05, zoom / 1.3))}
+          title="Zoom out"
+        >
+          −
+        </button>
         <input
           type="range"
           min={0.05}
@@ -90,8 +100,16 @@ export default function TransportBar({
           step={0.01}
           value={zoom}
           onChange={(event) => onZoomChange(Number(event.target.value))}
-          className="w-28 accent-white"
+          className="w-24 accent-white"
         />
+        <button
+          type="button"
+          className="ch-button px-2"
+          onClick={() => onZoomChange(Math.min(1.2, zoom * 1.3))}
+          title="Zoom in"
+        >
+          +
+        </button>
       </Control>
 
       <Control label="Speed">
@@ -114,6 +132,9 @@ export default function TransportBar({
       </Control>
 
       <div className="ml-auto flex items-center gap-1.5">
+        <button type="button" className="ch-button px-2.5" onClick={onShowHelp} title="Keyboard shortcuts">
+          ?
+        </button>
         <button type="button" className="ch-button" onClick={onUndo} disabled={!canUndo}>
           Undo
         </button>
