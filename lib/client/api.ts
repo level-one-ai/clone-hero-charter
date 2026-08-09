@@ -181,6 +181,20 @@ export async function exportPreflight(
 }
 
 /**
+ * URL for one file out of the export folder.
+ *
+ * Used by the dialog's per-file links, which matter when the app is served over plain
+ * HTTP: Chrome blocks `.zip` from an insecure origin, but the individual chart, ini and
+ * audio files are ordinary text and media. It is also simply the quicker way to re-pull
+ * a tweaked notes.chart without the audio attached.
+ */
+export function exportFileUrl(id: string, name: string, keepOriginalAudio: boolean): string {
+  return `/api/songs/${id}/export/file?name=${encodeURIComponent(name)}&keepOriginalAudio=${
+    keepOriginalAudio ? '1' : '0'
+  }`;
+}
+
+/**
  * Start the download.
  *
  * A plain navigation rather than fetch-to-Blob: the browser streams the zip straight to

@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import type { Project } from '@/lib/chart/types';
 import { exportFolderName } from '@/lib/chart/naming';
-import { exportPreflight, type ExportPreflight } from '@/lib/client/api';
+import { exportFileUrl, exportPreflight, type ExportPreflight } from '@/lib/client/api';
 
 /**
  * Export dialog.
@@ -39,6 +39,16 @@ export default function ExportDialog({
   const [plan, setPlan] = useState<ExportPreflight | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
   const [loadingPlan, setLoadingPlan] = useState(false);
+  /**
+   * False when the page is served over plain HTTP (anything but localhost), which is
+   * exactly when Chrome refuses to download the zip. Read in an effect because
+   * `window` does not exist during server rendering.
+   */
+  const [secureContext, setSecureContext] = useState(true);
+
+  useEffect(() => {
+    setSecureContext(window.isSecureContext);
+  }, []);
 
   const sourceExt = project.audio.file.slice(project.audio.file.lastIndexOf('.')).toLowerCase();
   const alreadyOgg = sourceExt === '.ogg';
@@ -115,9 +125,22 @@ export default function ExportDialog({
             </p>
             <div className="border border-edge2 bg-bg p-3 font-mono text-2xs">
               <p className="text-fg">{folderName}/</p>
-              <ul className="mt-1 space-y-0.5 pl-4 text-muted">
+              <ul className="mt-1 space-y-0.5 pl-4">
                 {files.map((file) => (
-                  <li key={file}>{file}</li>
+                  <li key={file} className="flex items-baseline justify-between gap-3">
+                    <span className="text-muted">{file}</span>
+                    {/*
+                      A direct link, not a button: the response carries
+                      Content-Disposition: attachment, so the browser downloads it and
+                      leaves the dialog exactly where it is.
+                    */}
+                    <a
+                      href={exportFileUrl(songId, file, effectiveKeepOriginal)}
+                      className="shrink-0 font-sans text-faint underline-offset-2 hover:text-fg hover:underline"
+                    >
+                      download
+                    </a>
+                  </li>
                 ))}
               </ul>
             </div>
@@ -125,6 +148,23 @@ export default function ExportDialog({
               Downloads as {folderName}.zip. Extract it into your Clone Hero Songs folder.
             </p>
           </div>
+
+          {!secureContext && (
+            <div className="border border-edge2 bg-bg p-2 text-2xs text-muted">
+              <p className="text-lane-orange">This page is not served over HTTPS.</p>
+              <p className="mt-1">
+                Chrome refuses to download <span className="font-mono">.zip</span> files over a
+                plain HTTP connection, so the Export button below may be blocked. The individual
+                files above are ordinary text and audio and should still come through &mdash;
+                make a folder named{' '}
+                <span className="font-mono text-fg">{folderName}</span> and put them in it.
+              </p>
+              <p className="mt-1">
+                The real fix is a certificate. Failing that, Firefox does not block these
+                downloads.
+              </p>
+            </div>
+          )}
 
           {leadIn > 0 && (
             <p className="text-2xs text-faint">

@@ -42,10 +42,36 @@ contain (`GET /api/songs/<id>/export?dryRun=1`) and shows the real file list and
 The download itself is a plain navigation to `GET /api/songs/<id>/export`, so the browser
 streams the zip straight to disk instead of the tab buffering the whole archive in memory.
 
-**Serve the app over HTTPS.** Chrome blocks `.zip` downloads from insecure (HTTP) origins
-with *"Insecure download blocked"*. That block is correct — over plain HTTP the archive
-can be tampered with in transit — so the fix is a certificate, not a workaround. On
-Coolify: set the domain to `https://…`, tick **Generate SSL Certificate**, redeploy.
+**Serve the app over HTTPS.** Chrome blocks `.zip` downloads from insecure (HTTP)
+origins with *"Insecure download blocked"*, offering only *Discard* — there is no "keep
+anyway" for this class of block. That is correct behaviour: over plain HTTP the archive
+can be rewritten in transit. So the fix is a certificate, not a workaround.
+
+On Coolify, point a domain's A record at the server, set the application's domain to
+`https://…`, enable **Generate SSL Certificate**, and redeploy. Ports **80 and 443** both
+have to be reachable — 80 is where Let's Encrypt answers its HTTP-01 challenge — and on
+Oracle Cloud images that means the host firewall as well as the VCN security list. If the
+DNS is behind Cloudflare, set the record to DNS-only while the certificate issues, since
+the proxy intercepts the challenge path.
+
+Prefer a domain you control over a `*.sslip.io` address. Let's Encrypt rate-limits per
+registered domain, and `sslip.io` is a single registered domain shared by everyone using
+the service — its weekly quota has been exhausted before
+([cunnie/sslip.io#108](https://github.com/cunnie/sslip.io/issues/108)), which fails
+issuance through no fault of your configuration.
+
+**Downloading files individually.** The export dialog lists each file in the folder with
+its own download link, served by `GET /api/songs/<id>/export/file?name=<file>`. They come
+from the same plan as the zip, so a file fetched on its own is the one that would have
+been inside the archive — the chart carries the same lead-in offset, and the audio is the
+same transcode. Two reasons this exists:
+
+- A Clone Hero song *is* a folder of these files; the zip is only a wrapper. Pulling a
+  tweaked `notes.chart` on its own beats re-downloading forty megabytes of audio with it.
+- Chrome's insecure-download block targets archives and executables, not text and audio.
+  On a plain-HTTP deployment the dialog says so and points at these links, so an instance
+  without a certificate is never a dead end. Fixing HTTPS is still the right answer, and
+  Firefox does not block the zip in the first place.
 
 ---
 
