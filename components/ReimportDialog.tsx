@@ -5,6 +5,7 @@ import type { Project } from '@/lib/chart/types';
 import {
   analyzeReimport,
   applyReimport,
+  type MelodyOptions,
   type ReimportAnalysis,
   type ReimportMode,
   type ReimportTrackOption,
@@ -43,6 +44,13 @@ export default function ReimportDialog({ project, open, onClose, onApplied }: Pr
   const [trackIndex, setTrackIndex] = useState<number | null>(null);
   const [octaveOffset, setOctaveOffset] = useState(0);
   const [mode, setMode] = useState<ReimportMode>('auto');
+  const [melody, setMelody] = useState<MelodyOptions>({
+    strategy: 'pitch',
+    split: 'balanced',
+    useOpenNotes: true,
+    invert: false,
+    maxChordSize: 3,
+  });
   const [confirming, setConfirming] = useState(false);
 
   const load = useCallback(async () => {
@@ -97,6 +105,7 @@ export default function ReimportDialog({ project, open, onClose, onApplied }: Pr
         trackIndex: trackIndex ?? undefined,
         octaveOffset,
         mode,
+        melody,
       });
       onApplied(updated);
       onClose();
@@ -231,6 +240,113 @@ export default function ReimportDialog({ project, open, onClose, onApplied }: Pr
                 </span>
               </label>
 
+              {/* Only meaningful for a transcription, where frets are derived. */}
+              {(analysis.musicalMode || mode === 'musical') && (
+                <div className="mt-4 border border-edge2 bg-bg p-3">
+                  <p className="mb-3 text-2xs uppercase tracking-widest text-muted">
+                    How pitches become frets
+                  </p>
+
+                  <div className="space-y-3">
+                    <Choice
+                      label="Mapping"
+                      value={melody.strategy}
+                      options={[
+                        ['pitch', 'By pitch'],
+                        ['contour', 'By melody'],
+                      ]}
+                      onChange={(value) => {
+                        setMelody((m) => ({ ...m, strategy: value as MelodyOptions['strategy'] }));
+                        setConfirming(false);
+                      }}
+                      hint={
+                        melody.strategy === 'pitch'
+                          ? 'Low pitches on green, high on orange. The same pitch always gets the same fret.'
+                          : 'The fret moves as the melody moves. Spreads across the fretboard more, but a pitch can land on different frets.'
+                      }
+                    />
+
+                    {melody.strategy === 'pitch' && (
+                      <>
+                        <Choice
+                          label="Fret bands"
+                          value={melody.split}
+                          options={[
+                            ['balanced', 'Balanced'],
+                            ['distinct', 'By pitch count'],
+                            ['even', 'Even split'],
+                          ]}
+                          onChange={(value) => {
+                            setMelody((m) => ({ ...m, split: value as MelodyOptions['split'] }));
+                            setConfirming(false);
+                          }}
+                          hint={
+                            melody.split === 'balanced'
+                              ? 'Boundaries placed so each fret gets a similar share of the notes.'
+                              : melody.split === 'distinct'
+                                ? 'Equal numbers of distinct pitches per fret, ignoring how often each is played.'
+                                : 'Equal slices of the pitch range. Most literal, but a part camped on a few low notes crowds onto one or two frets.'
+                          }
+                        />
+
+                        <label className="flex cursor-pointer items-start gap-2">
+                          <input
+                            type="checkbox"
+                            checked={melody.useOpenNotes}
+                            onChange={(event) => {
+                              setMelody((m) => ({ ...m, useOpenNotes: event.target.checked }));
+                              setConfirming(false);
+                            }}
+                            className="mt-0.5 accent-white"
+                          />
+                          <span className="text-2xs">
+                            <span className="text-fg">Use open notes for the lowest band</span>
+                            <span className="mt-0.5 block text-faint">
+                              The purple bar. Six bands instead of five, with the lowest pitches
+                              becoming opens.
+                            </span>
+                          </span>
+                        </label>
+
+                        <label className="flex cursor-pointer items-start gap-2">
+                          <input
+                            type="checkbox"
+                            checked={melody.invert}
+                            onChange={(event) => {
+                              setMelody((m) => ({ ...m, invert: event.target.checked }));
+                              setConfirming(false);
+                            }}
+                            className="mt-0.5 accent-white"
+                          />
+                          <span className="text-2xs">
+                            <span className="text-fg">Invert</span>
+                            <span className="mt-0.5 block text-faint">
+                              High pitches take green and low take orange, instead of the usual way
+                              round.
+                            </span>
+                          </span>
+                        </label>
+                      </>
+                    )}
+
+                    <Choice
+                      label="Max chord size"
+                      value={String(melody.maxChordSize)}
+                      options={[
+                        ['2', '2'],
+                        ['3', '3'],
+                        ['5', '5'],
+                      ]}
+                      onChange={(value) => {
+                        setMelody((m) => ({ ...m, maxChordSize: Number(value) }));
+                        setConfirming(false);
+                      }}
+                      hint="Notes sounding together beyond this are trimmed, keeping the outer two that define the chord's span."
+                    />
+                  </div>
+                </div>
+              )}
+
               {selected && (
                 <div className="mt-4 border border-edge2 bg-bg p-3">
                   <p className="mb-2 text-2xs uppercase tracking-widest text-faint">
@@ -351,5 +467,42 @@ function TrackRow({
         <span className={`shrink-0 font-mono text-2xs ${fitColor}`}>{fitPercent}% fit</span>
       </button>
     </li>
+  );
+}
+
+function Choice({
+  label,
+  value,
+  options,
+  onChange,
+  hint,
+}: {
+  label: string;
+  value: string;
+  options: Array<readonly [string, string]>;
+  onChange: (value: string) => void;
+  hint: string;
+}) {
+  return (
+    <div>
+      <span className="ch-label">{label}</span>
+      <div className="flex flex-wrap">
+        {options.map(([optionValue, optionLabel]) => (
+          <button
+            key={optionValue}
+            type="button"
+            onClick={() => onChange(optionValue)}
+            className={`border px-2.5 py-1 text-2xs ${
+              value === optionValue
+                ? 'border-fg bg-fg text-bg'
+                : 'border-edge2 bg-panel text-muted hover:text-fg'
+            }`}
+          >
+            {optionLabel}
+          </button>
+        ))}
+      </div>
+      <p className="mt-1 text-2xs text-faint">{hint}</p>
+    </div>
   );
 }

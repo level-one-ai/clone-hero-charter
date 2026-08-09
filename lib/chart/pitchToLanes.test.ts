@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assignLanesByContour, groupByTick } from './pitchToLanes';
+import { assignLanesByContour, assignLanesByPitch, groupByTick } from './pitchToLanes';
 
 const R = 192;
 const OPTS = { sustainCutoff: R, maxChordSize: 2 };
@@ -133,5 +133,146 @@ describe('groupByTick', () => {
       { tick: 0, pitch: 62, durationTicks: 0 },
     ]);
     expect(groups.map((g) => g.tick)).toEqual([0, 960]);
+  });
+});
+
+describe('assignLanesByPitch', () => {
+  const OPEN = 7;
+
+  /** A run of distinct ascending pitches, one per tick. */
+  function scale(pitches: number[]) {
+    return groupByTick(pitches.map((pitch, i) => ({ tick: i * R, pitch, durationTicks: 0 })));
+  }
+
+  it('puts low pitches on green and high pitches on orange', () => {
+    const pitches = [40, 44, 48, 52, 56];
+    const lanes = assignLanesByPitch(scale(pitches), {
+      ...OPTS,
+      useOpenNotes: false,
+      split: 'even',
+    }).map((r) => r.lanes[0]);
+    expect(lanes[0]).toBe(0); // lowest -> green
+    expect(lanes[lanes.length - 1]).toBe(4); // highest -> orange
+  });
+
+  it('never puts a higher pitch on a lower fret', () => {
+    // The invariant the whole mapping rests on: it is monotonic in pitch.
+    const pitches = Array.from({ length: 40 }, (_, i) => 30 + i);
+    for (const split of ['even', 'balanced', 'distinct'] as const) {
+      const lanes = assignLanesByPitch(scale(pitches), { ...OPTS, split, useOpenNotes: false }).map(
+        (r) => r.lanes[0],
+      );
+      for (let i = 1; i < lanes.length; i += 1) {
+        expect(lanes[i]).toBeGreaterThanOrEqual(lanes[i - 1]);
+      }
+    }
+  });
+
+  it('gives the same pitch the same fret everywhere in the song', () => {
+    const result = assignLanesByPitch(scale([40, 60, 40, 80, 40]), {
+      ...OPTS,
+      useOpenNotes: false,
+    });
+    const lanesFor40 = [result[0].lanes[0], result[2].lanes[0], result[4].lanes[0]];
+    expect(new Set(lanesFor40).size).toBe(1);
+  });
+
+  it('inverts so the highest pitches take green', () => {
+    const lanes = assignLanesByPitch(scale([40, 44, 48, 52, 56]), {
+      ...OPTS,
+      useOpenNotes: false,
+      split: 'even',
+      invert: true,
+    }).map((r) => r.lanes[0]);
+    expect(lanes[0]).toBe(4);
+    expect(lanes[lanes.length - 1]).toBe(0);
+  });
+
+  it('reserves the lowest band for open notes when asked', () => {
+    const lanes = assignLanesByPitch(scale([30, 40, 50, 60, 70, 80]), {
+      ...OPTS,
+      useOpenNotes: true,
+      split: 'even',
+    }).map((r) => r.lanes[0]);
+    expect(lanes[0]).toBe(OPEN);
+    expect(lanes.slice(1).every((lane) => lane !== OPEN)).toBe(true);
+  });
+
+  it('uses no open notes when they are switched off', () => {
+    const lanes = assignLanesByPitch(scale([30, 40, 50, 60, 70, 80]), {
+      ...OPTS,
+      useOpenNotes: false,
+    }).flatMap((r) => r.lanes);
+    expect(lanes).not.toContain(OPEN);
+  });
+
+  it('maps every note of a chord by its own pitch', () => {
+    const groups = groupByTick([
+      { tick: 0, pitch: 40, durationTicks: 0 },
+      { tick: 0, pitch: 80, durationTicks: 0 },
+      { tick: R, pitch: 40, durationTicks: 0 },
+      { tick: R, pitch: 80, durationTicks: 0 },
+    ]);
+    const [chord] = assignLanesByPitch(groups, { ...OPTS, useOpenNotes: false, split: 'even' });
+    expect(chord.lanes).toHaveLength(2);
+    // The chord spans the fretboard because the pitches span the range.
+    expect(chord.lanes[0]).toBe(0);
+    expect(chord.lanes[1]).toBe(4);
+  });
+
+  it('drops the open note when a chord spans the open boundary', () => {
+    // Clone Hero cannot play an open note together with frets, so the frets win.
+    const groups = groupByTick([
+      { tick: 0, pitch: 30, durationTicks: 0 }, // would be open
+      { tick: 0, pitch: 80, durationTicks: 0 }, // a fret
+      { tick: R, pitch: 55, durationTicks: 0 },
+    ]);
+    const [chord] = assignLanesByPitch(groups, { ...OPTS, useOpenNotes: true, split: 'even' });
+    expect(chord.lanes).not.toContain(OPEN);
+    expect(chord.lanes.length).toBeGreaterThan(0);
+  });
+
+  it('caps chord size, keeping the outer notes that define its span', () => {
+    const groups = groupByTick(
+      [30, 45, 55, 65, 80].map((pitch) => ({ tick: 0, pitch, durationTicks: 0 })),
+    );
+    const [chord] = assignLanesByPitch(groups, {
+      ...OPTS,
+      useOpenNotes: false,
+      split: 'even',
+      maxChordSize: 3,
+    });
+    expect(chord.lanes).toHaveLength(3);
+    expect(chord.lanes[0]).toBe(0);
+    expect(chord.lanes[chord.lanes.length - 1]).toBe(4);
+  });
+
+  it('leaves no fret unused when one pitch dominates the part', () => {
+    // A riff camped on its root crosses several fixed band targets at once, which used
+    // to collapse those bands and leave whole frets empty.
+    const notes: Array<{ tick: number; pitch: number; durationTicks: number }> = [];
+    let tick = 0;
+    for (let i = 0; i < 200; i += 1) notes.push({ tick: (tick += R), pitch: 40, durationTicks: 0 });
+    for (const pitch of [42, 45, 47, 50, 52]) {
+      for (let i = 0; i < 10; i += 1) notes.push({ tick: (tick += R), pitch, durationTicks: 0 });
+    }
+    const lanes = new Set(
+      assignLanesByPitch(groupByTick(notes), {
+        ...OPTS,
+        useOpenNotes: false,
+        split: 'balanced',
+      }).flatMap((r) => r.lanes),
+    );
+    expect(lanes.size).toBe(5);
+  });
+
+  it('handles a part with only one pitch', () => {
+    const result = assignLanesByPitch(scale([40, 40, 40]), { ...OPTS, useOpenNotes: false });
+    expect(result).toHaveLength(3);
+    expect(new Set(result.flatMap((r) => r.lanes)).size).toBe(1);
+  });
+
+  it('handles an empty input', () => {
+    expect(assignLanesByPitch([], OPTS)).toEqual([]);
   });
 });

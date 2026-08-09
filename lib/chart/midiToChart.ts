@@ -11,7 +11,12 @@ import {
   type Project,
   type StarPowerPhrase,
 } from './types';
-import { assignLanesByContour, groupByTick } from './pitchToLanes';
+import {
+  assignLanesByContour,
+  assignLanesByPitch,
+  groupByTick,
+  type BandSplit,
+} from './pitchToLanes';
 
 /**
  * MIDI -> chart conversion for Guitar Hero style .mid files.
@@ -208,8 +213,23 @@ export interface MidiImportResult {
  */
 export type MidiImportMode = 'auto' | 'chart' | 'musical';
 
+/** How a transcription's pitches become frets. See lib/chart/pitchToLanes. */
+export interface MelodyMappingOptions {
+  /** 'pitch' (default): low pitch to green, high to orange. 'contour': follow the tune. */
+  strategy?: 'pitch' | 'contour';
+  /** Where the band boundaries fall. Only used by the pitch strategy. */
+  split?: BandSplit;
+  /** Reserve the lowest pitch band for open notes. */
+  useOpenNotes?: boolean;
+  /** Flip so the highest pitches take green instead of orange. */
+  invert?: boolean;
+  /** Cap on simultaneous notes. */
+  maxChordSize?: number;
+}
+
 export interface MidiImportOptions {
   mode?: MidiImportMode;
+  melody?: MelodyMappingOptions;
   resolution?: number;
   /**
    * Force a specific semitone offset instead of auto-detecting it. Use when the
@@ -392,7 +412,7 @@ export function midiToChart(
           : `no track uses the chart note layout, so this was read as a transcription; frets derived from the melody in "${midi.tracks[best].name || `track ${best}`}"`;
       if (mode !== 'musical') {
         warnings.push(
-          'This is a transcription of the song, not a Guitar Hero chart — its note numbers are pitches, not fret colours. The timing and tempo have been imported exactly, and the frets were derived from the melody, so treat the result as a starting point and adjust the lanes for playability.',
+          'This is a transcription of the song, not a Guitar Hero chart — its note numbers are pitches, not fret colours. The timing and tempo have been imported exactly, and the frets were derived from those pitches (low pitches on green, high on orange). Adjust the lanes for playability, or change the mapping under Song → Re-import from MIDI.',
         );
       }
     }
@@ -433,6 +453,7 @@ export function midiToChart(
     // A quarter note, not the 1/12 step used when reading a real chart — see the note
     // on sustainCutoff in pitchToLanes.
     const sustainCutoff = resolution;
+    const melody = options.melody ?? {};
     const groups = groupByTick(
       track.notes.map((n) => ({
         tick: toChartTick(n.ticks),
@@ -440,7 +461,20 @@ export function midiToChart(
         durationTicks: toChartTick(n.durationTicks),
       })),
     );
-    const assignments = assignLanesByContour(groups, { sustainCutoff, maxChordSize: 2 });
+
+    const assignments =
+      melody.strategy === 'contour'
+        ? assignLanesByContour(groups, {
+            sustainCutoff,
+            maxChordSize: melody.maxChordSize ?? 2,
+          })
+        : assignLanesByPitch(groups, {
+            sustainCutoff,
+            split: melody.split ?? 'balanced',
+            useOpenNotes: melody.useOpenNotes ?? true,
+            invert: melody.invert ?? false,
+            maxChordSize: melody.maxChordSize ?? 3,
+          });
 
     const notes: Note[] = [];
     for (const assignment of assignments) {

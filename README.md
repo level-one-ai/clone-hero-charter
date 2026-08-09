@@ -293,28 +293,47 @@ music, where note 40 means E2 rather than "green". Plenty of guitar MIDIs found 
 are like this.
 
 These are still worth importing, because the hard part of charting is the timing, and a
-transcription already has it exactly. The importer switches to **melody mode**: it keeps
-the note timings, tempo map and time signatures verbatim, and derives the frets from the
-melody's contour —
+transcription already has it exactly. The importer keeps the note timings, tempo map and
+time signatures verbatim, and derives the frets from the pitches.
 
-- same pitch → same fret
-- the line rises → move up the neck, further for a bigger interval
-- the line falls → move down
-- simultaneous notes → a chord on adjacent frets
+**By pitch (the default).** Low pitches take green, high pitches take orange, and a
+given pitch always produces the same fret wherever it appears. Every note of a chord is
+mapped by its own pitch, so a chord's shape on the fretboard mirrors its shape in the
+music. The mapping is monotonic: a higher pitch never lands on a lower fret.
 
-The result is a rhythmically exact Expert chart that you refine for playability, rather
-than 600 notes to place by hand. Two details that matter in practice: a pitch change
-always produces a fret change (otherwise you would be strumming one fret for what is
-audibly a different note), and sustains use a quarter-note threshold rather than the
-1/12 step used for real charts — transcriptions are written legato, so the shorter
-threshold turns ~80% of the chart into sustains.
+The lowest band becomes **open notes** (the purple bar) by default, giving six bands
+rather than five. Where a chord straddles that boundary the frets win, since Clone Hero
+cannot play an open note together with frets.
+
+How the band boundaries are drawn matters more than it sounds, because most parts are
+not evenly spread across their range:
+
+| Split | Behaviour |
+|---|---|
+| **Balanced** (default) | Boundaries placed so each fret gets a similar share of the notes |
+| **By pitch count** | Equal numbers of distinct pitches per fret |
+| **Even split** | Equal slices of the pitch range — most literal |
+
+An even split is the most faithful and often the least playable. On a riff camped on a
+few low notes it can put over half the song on green and leave blue almost unused;
+balanced keeps the pitch ordering while using the whole fretboard.
+
+**By melody** is the alternative, chosen in the same dialog: the fret moves as the
+melody moves, up for a rise and down for a fall, further for a bigger interval. It
+spreads across the fretboard more evenly, at the cost of the same pitch landing on
+different frets in different places.
+
+Whichever is used, sustains take a quarter-note threshold rather than the 1/12 step used
+for real charts. Transcriptions are written legato, so the shorter threshold turns ~80%
+of the chart into sustains.
 
 Lower difficulties are deliberately left empty. Auto-thinned ones come out unmusical and
 need redoing anyway.
 
-You can force either interpretation from **Song → Re-import from MIDI**, using the
-**Auto / Chart / Melody** switch — handy if a genuine chart gets misread, or if you want
-melody mapping applied to a file that happens to score as a chart.
+All of this is adjustable under **Song → Re-import from MIDI**: the **Auto / Chart /
+Melody** switch forces how the file is read, and when it is read as a melody you get the
+mapping strategy, band split, open-note toggle, an **Invert** option (high pitches on
+green instead of orange), and a maximum chord size.
 
 Tempo and time-signature maps are imported from the MIDI header, and ticks are rescaled
 from the file's PPQ to the chart resolution of 192.

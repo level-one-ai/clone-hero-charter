@@ -80,6 +80,15 @@ export interface ReimportTrackOption {
 
 export type ReimportMode = 'auto' | 'chart' | 'musical';
 
+/** How a transcription's pitches become frets. */
+export interface MelodyOptions {
+  strategy: 'pitch' | 'contour';
+  split: 'even' | 'balanced' | 'distinct';
+  useOpenNotes: boolean;
+  invert: boolean;
+  maxChordSize: number;
+}
+
 export interface ReimportAnalysis {
   currentTrack: string;
   selectionReason: string;
@@ -101,7 +110,12 @@ export async function analyzeReimport(id: string): Promise<ReimportAnalysis> {
 /** Re-run the MIDI import with an explicit track and octave offset. Destructive. */
 export async function applyReimport(
   id: string,
-  options: { trackIndex?: number; octaveOffset?: number; mode?: ReimportMode },
+  options: {
+    trackIndex?: number;
+    octaveOffset?: number;
+    mode?: ReimportMode;
+    melody?: MelodyOptions;
+  },
 ): Promise<Project> {
   const body = await unwrap<{ project: Project }>(
     await fetch(`/api/songs/${id}/reimport`, {

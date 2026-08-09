@@ -1,7 +1,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { NextResponse } from 'next/server';
-import { midiToChart, formatImportReport } from '@/lib/chart/midiToChart';
+import {
+  midiToChart,
+  formatImportReport,
+  type MelodyMappingOptions,
+} from '@/lib/chart/midiToChart';
 import { isValidSongId, songDir } from '@/lib/server/paths';
 import { readProject, saveProject } from '@/lib/server/storage';
 
@@ -111,7 +115,18 @@ export async function POST(request: Request, { params }: Params) {
   const existing = await readProject(id);
   if (!existing) return NextResponse.json({ error: 'Song not found' }, { status: 404 });
 
-  let body: { trackIndex?: number; octaveOffset?: number; mode?: string } = {};
+  let body: {
+    trackIndex?: number;
+    octaveOffset?: number;
+    mode?: string;
+    melody?: {
+      strategy?: string;
+      split?: string;
+      useOpenNotes?: boolean;
+      invert?: boolean;
+      maxChordSize?: number;
+    };
+  } = {};
   try {
     body = ((await request.json()) ?? {}) as typeof body;
   } catch {
@@ -132,6 +147,20 @@ export async function POST(request: Request, { params }: Params) {
       ? body.mode
       : undefined;
 
+  // Whitelist rather than pass through: these come from a request body.
+  const raw = body.melody ?? {};
+  const melody: MelodyMappingOptions = {
+    strategy: raw.strategy === 'contour' ? 'contour' : 'pitch',
+    split:
+      raw.split === 'even' || raw.split === 'distinct' || raw.split === 'balanced'
+        ? raw.split
+        : 'balanced',
+    useOpenNotes: raw.useOpenNotes !== false,
+    invert: raw.invert === true,
+    maxChordSize:
+      typeof raw.maxChordSize === 'number' ? Math.max(1, Math.min(5, raw.maxChordSize)) : 3,
+  };
+
   const sourcePath = path.join(songDir(id), 'source.mid');
   let buffer: Buffer;
   try {
@@ -148,6 +177,7 @@ export async function POST(request: Request, { params }: Params) {
       trackIndex,
       octaveOffset,
       mode,
+      melody,
       resolution: existing.resolution,
     });
     console.log(`[midi-reimport ${id}]\n${formatImportReport(result.report)}`);

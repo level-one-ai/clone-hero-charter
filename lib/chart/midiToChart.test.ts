@@ -234,10 +234,27 @@ describe('midiToChart', () => {
     // than an empty one.
     expect(report.notesPerDifficulty.Expert).toBeGreaterThan(0);
     expect(project.tracks.ExpertSingle.notes.length).toBeGreaterThan(0);
+    // Frets 0-4, or 7 for an open note — the lowest pitch band becomes opens.
     for (const note of project.tracks.ExpertSingle.notes) {
-      expect(note.lane).toBeGreaterThanOrEqual(0);
-      expect(note.lane).toBeLessThanOrEqual(4);
+      expect([0, 1, 2, 3, 4, 7]).toContain(note.lane);
     }
+  });
+
+  it('maps low pitches to green and high pitches to orange by default', () => {
+    const { project } = midiToChart(buildMusicalMidi(), 'id', {
+      melody: { split: 'even', useOpenNotes: false },
+    });
+    const notes = project.tracks.ExpertSingle.notes;
+    // The defining property of pitch mapping: fret order follows pitch order.
+    const lowest = Math.min(...notes.map((n) => n.lane));
+    const highest = Math.max(...notes.map((n) => n.lane));
+    expect(lowest).toBe(0);
+    expect(highest).toBe(4);
+  });
+
+  it('produces open notes for the lowest band by default', () => {
+    const { project } = midiToChart(buildMusicalMidi(), 'id');
+    expect(project.tracks.ExpertSingle.notes.some((n) => n.lane === 7)).toBe(true);
   });
 
   it('says plainly that a converted file was a transcription, not a chart', () => {
