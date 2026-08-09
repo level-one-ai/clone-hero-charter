@@ -15,6 +15,7 @@ import {
 } from '@/lib/server/audio';
 import { exportFolderName, isValidSongId, songDir, songFile } from '@/lib/server/paths';
 import { readProject } from '@/lib/server/storage';
+import type { Project } from '@/lib/chart/types';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -24,7 +25,7 @@ interface Params {
 }
 
 /**
- * POST /api/songs/[id]/export — package a Clone Hero song folder as a zip.
+ * Export a Clone Hero song folder as a zip.
  *
  * ---------------------------------------------------------------------------
  * WHAT CLONE HERO ACTUALLY EXPECTS
@@ -38,43 +39,61 @@ interface Params {
  *     song.ini      metadata           (this, not the chart's [Song] block, is
  *                                       what the in-game song browser reads)
  *
- * So the zip contains exactly one top-level folder named "Artist - Title", and the
- * user extracts it straight into Songs/.
+ * So the zip contains exactly one top-level folder named "Artist - Title (Charter)",
+ * and the user extracts it straight into Songs/.
  *
  * AUDIO FORMAT DECISION: we transcode to OGG Vorbis by default. Clone Hero does load
  * .wav, but a lossless WAV is roughly ten times the size of a q5 Vorbis file and the
  * whole point of the export is a folder that is convenient to move around. Pass
- * `keepOriginalAudio: true` to skip the transcode — and we fall back to the original
+ * `keepOriginalAudio` to skip the transcode — and we fall back to the original
  * automatically if ffmpeg is missing, rather than failing the export.
  *
  * PLATFORM NOTE: this produces a PC/Mac/Linux/Android Clone Hero folder. Clone Hero
  * does not run on Xbox 360 — 360 customs are signed CON/STFS packages containing
  * .mid + .mogg + DTA, which is a different toolchain entirely and not what this
  * exports.
+ *
  * ---------------------------------------------------------------------------
+ * GET vs POST
+ * ---------------------------------------------------------------------------
+ * GET is the download the browser navigates to, so the zip streams straight to disk.
+ * The client used to POST, read the whole response into a Blob and click a synthetic
+ * anchor at an object URL — which buffered the entire archive in the tab first, tens of
+ * megabytes for a keep-original-WAV export of a long song.
+ *
+ * `?dryRun=1` resolves everything and returns JSON without building the archive, so the
+ * export dialog can show the real file list and any warnings BEFORE the download starts
+ * rather than after it has finished.
+ *
+ * POST is kept for compatibility with anything already calling it.
  */
-export async function POST(request: Request, { params }: Params) {
-  const { id } = await params;
-  if (!isValidSongId(id)) return NextResponse.json({ error: 'Invalid song id' }, { status: 400 });
 
+/** Everything resolved before a single byte is written. */
+interface ExportPlan {
+  project: Project;
+  folderName: string;
+  audioPath: string;
+  audioExt: string;
+  alreadyOgg: boolean;
+  canTranscode: boolean;
+  leadingSilenceMs: number;
+  durationMs: number;
+  warnings: string[];
+  /** Names as they will appear inside the folder, in archive order. */
+  files: string[];
+}
+
+async function planExport(
+  id: string,
+  keepOriginalAudio: boolean,
+): Promise<ExportPlan | { error: string; status: number }> {
   const project = await readProject(id);
-  if (!project) return NextResponse.json({ error: 'Song not found' }, { status: 404 });
-
-  let keepOriginalAudio = false;
-  try {
-    const body = (await request.json()) as { keepOriginalAudio?: boolean } | null;
-    keepOriginalAudio = Boolean(body?.keepOriginalAudio);
-  } catch {
-    // No body is fine — defaults apply.
-  }
+  if (!project) return { error: 'Song not found', status: 404 };
 
   const dir = songDir(id);
   const audioPath = path.join(dir, project.audio.file);
   if (!project.audio.file || !(await exists(audioPath))) {
-    return NextResponse.json(
-      { error: 'The project has no audio file, so it cannot be exported' },
-      { status: 400 },
-    );
+    return { error: 'The project has no audio file, so it cannot be exported', status: 400 };
   }
 
   // song_length must be accurate — Clone Hero uses it for the progress bar and for
@@ -88,9 +107,7 @@ export async function POST(request: Request, { params }: Params) {
   const leadingSilenceMs = Math.max(0, Math.round(project.meta.leadingSilenceMs ?? 0));
   durationMs += leadingSilenceMs;
 
-  // "ERRA - Gore of Being (enerbewow)" — the Clone Hero library convention.
   const folderName = exportFolderName(project.meta);
-
   const audioExt = path.extname(project.audio.file).toLowerCase();
   const alreadyOgg = audioExt === '.ogg';
   const wantTranscode = !keepOriginalAudio && !alreadyOgg;
@@ -99,20 +116,67 @@ export async function POST(request: Request, { params }: Params) {
   // later can only produce a corrupt download.
   const canTranscode = wantTranscode ? await canTranscodeToOgg(audioPath) : false;
 
+  const warnings: string[] = [];
+  if (wantTranscode && !canTranscode) {
+    warnings.push(
+      (await hasFfmpeg())
+        ? 'ffmpeg could not convert this audio to OGG, so the original file will be packaged instead. Clone Hero will still load it.'
+        : 'ffmpeg is not available, so the original audio will be packaged without transcoding.',
+    );
+  }
+
+  const padOriginal = !canTranscode && leadingSilenceMs > 0 && (await hasFfmpeg());
+  if (leadingSilenceMs > 0 && !canTranscode && !padOriginal) {
+    warnings.push(
+      'ffmpeg is not available, so the lead-in silence cannot be added to the audio. The chart would be out of sync by that amount.',
+    );
+  }
+
+  const audioName = canTranscode ? 'song.ogg' : `song${alreadyOgg ? '.ogg' : audioExt}`;
+  const files = ['notes.chart', audioName, 'song.ini'];
+
+  if (project.album) {
+    try {
+      if (await exists(songFile(id, project.album))) {
+        files.push(path.extname(project.album).toLowerCase() === '.png' ? 'album.png' : 'album.jpg');
+      }
+    } catch {
+      warnings.push('Album art could not be read and will be left out of the export.');
+    }
+  }
+
+  return {
+    project,
+    folderName,
+    audioPath,
+    audioExt,
+    alreadyOgg,
+    canTranscode,
+    leadingSilenceMs,
+    durationMs,
+    warnings,
+    files,
+  };
+}
+
+function buildArchive(id: string, plan: ExportPlan): Response {
+  const {
+    project,
+    folderName,
+    audioPath,
+    audioExt,
+    alreadyOgg,
+    canTranscode,
+    leadingSilenceMs,
+    durationMs,
+    warnings,
+  } = plan;
+
   const archive = archiver('zip', {
     // Level 1: the payload is already-compressed audio, so heavier compression costs
     // CPU and wall-clock for almost no size gain.
     zlib: { level: 1 },
   });
-
-  const warnings: string[] = [];
-  if (wantTranscode && !canTranscode) {
-    warnings.push(
-      (await hasFfmpeg())
-        ? 'ffmpeg could not convert this audio to OGG, so the original file was packaged instead. Clone Hero will still load it.'
-        : 'ffmpeg is not available, so the original audio was packaged without transcoding.',
-    );
-  }
 
   // ---- notes.chart --------------------------------------------------------------
   // Regenerated from the current project rather than reading notes.chart off disk,
@@ -123,14 +187,16 @@ export async function POST(request: Request, { params }: Params) {
   // the front of the audio requires — and it keeps every note, tempo marker and time
   // signature where the editor put it. Shifting ticks instead would mean converting a
   // duration to ticks through the tempo map, which is both lossy and needless.
-  const exportProject = {
+  const exportProject: Project = {
     ...project,
     meta: { ...project.meta, offset: project.meta.offset + leadingSilenceMs / 1000 },
   };
   archive.append(writeChart(exportProject), { name: `${folderName}/notes.chart` });
 
   // ---- song.ini -----------------------------------------------------------------
-  archive.append(generateSongIni(exportProject, { durationMs }), { name: `${folderName}/song.ini` });
+  archive.append(generateSongIni(exportProject, { durationMs }), {
+    name: `${folderName}/song.ini`,
+  });
 
   // ---- audio --------------------------------------------------------------------
   if (canTranscode) {
@@ -154,22 +220,23 @@ export async function POST(request: Request, { params }: Params) {
     });
     // Piped straight into the archive — a large WAV is never written to disk twice.
     archive.append(ffmpeg.stdout, { name: `${folderName}/song.ogg` });
-  } else if (leadingSilenceMs > 0 && (await hasFfmpeg())) {
+  } else if (leadingSilenceMs > 0) {
     // Keeping the original format, but the lead-in still has to be baked in or the
-    // chart would be out of sync with the audio by exactly that much.
+    // chart would be out of sync with the audio by exactly that much. planExport has
+    // already warned when ffmpeg is missing, in which case this falls through to the
+    // plain copy below.
     const format = audioExt.replace('.', '') || 'wav';
     const padder = spawnSilencePad(audioPath, leadingSilenceMs, format);
+    let padded = false;
+    padder.on('spawn', () => {
+      padded = true;
+    });
     padder.on('error', (error) => {
       console.error(`[export ${id}] could not pad the audio:`, error);
-      archive.abort();
+      if (padded) archive.abort();
     });
     archive.append(padder.stdout, { name: `${folderName}/song${audioExt}` });
   } else {
-    if (leadingSilenceMs > 0) {
-      warnings.push(
-        'ffmpeg is not available, so the lead-in silence could not be added to the audio. The chart will be out of sync by that amount.',
-      );
-    }
     archive.append(fs.createReadStream(audioPath), {
       name: `${folderName}/song${alreadyOgg ? '.ogg' : audioExt}`,
     });
@@ -179,14 +246,12 @@ export async function POST(request: Request, { params }: Params) {
   if (project.album) {
     try {
       const albumPath = songFile(id, project.album);
-      if (await exists(albumPath)) {
-        // Clone Hero accepts album.png or album.jpg; keep whichever the user gave us
-        // rather than re-encoding and losing quality.
-        const ext = path.extname(project.album).toLowerCase() === '.png' ? '.png' : '.jpg';
-        archive.append(fs.createReadStream(albumPath), { name: `${folderName}/album${ext}` });
-      }
+      // Clone Hero accepts album.png or album.jpg; keep whichever the user gave us
+      // rather than re-encoding and losing quality.
+      const ext = path.extname(project.album).toLowerCase() === '.png' ? '.png' : '.jpg';
+      archive.append(fs.createReadStream(albumPath), { name: `${folderName}/album${ext}` });
     } catch {
-      warnings.push('Album art could not be read and was left out of the export.');
+      // planExport already reported this; the zip is still valid without art.
     }
   }
 
@@ -210,6 +275,53 @@ export async function POST(request: Request, { params }: Params) {
       'X-Export-Warnings': warnings.length > 0 ? encodeURIComponent(warnings.join(' | ')) : '',
     },
   });
+}
+
+/** GET — the download itself, or `?dryRun=1` for what it would contain. */
+export async function GET(request: Request, { params }: Params) {
+  const { id } = await params;
+  if (!isValidSongId(id)) return NextResponse.json({ error: 'Invalid song id' }, { status: 400 });
+
+  const url = new URL(request.url);
+  const keepOriginalAudio = url.searchParams.get('keepOriginalAudio') === '1';
+  const dryRun = url.searchParams.get('dryRun') === '1';
+
+  const plan = await planExport(id, keepOriginalAudio);
+  if ('error' in plan) {
+    return NextResponse.json({ error: plan.error }, { status: plan.status });
+  }
+
+  if (dryRun) {
+    return NextResponse.json({
+      folderName: plan.folderName,
+      files: plan.files,
+      warnings: plan.warnings,
+      transcoding: plan.canTranscode,
+      leadingSilenceMs: plan.leadingSilenceMs,
+    });
+  }
+
+  return buildArchive(id, plan);
+}
+
+/** POST — same download, options in the body. Kept for existing callers. */
+export async function POST(request: Request, { params }: Params) {
+  const { id } = await params;
+  if (!isValidSongId(id)) return NextResponse.json({ error: 'Invalid song id' }, { status: 400 });
+
+  let keepOriginalAudio = false;
+  try {
+    const body = (await request.json()) as { keepOriginalAudio?: boolean } | null;
+    keepOriginalAudio = Boolean(body?.keepOriginalAudio);
+  } catch {
+    // No body is fine — defaults apply.
+  }
+
+  const plan = await planExport(id, keepOriginalAudio);
+  if ('error' in plan) {
+    return NextResponse.json({ error: plan.error }, { status: plan.status });
+  }
+  return buildArchive(id, plan);
 }
 
 async function exists(target: string): Promise<boolean> {

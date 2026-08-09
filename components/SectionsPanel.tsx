@@ -138,8 +138,10 @@ export default function SectionsPanel({
           Star power &mdash; {trackName.replace('Single', '')}
         </h3>
         <p className="text-2xs text-faint">
-          Select the notes a phrase should cover, then use <span className="text-fg">Star
-          power</span> on the note bar above the highway. Phrases are per difficulty.
+          Press <span className="text-fg">Star power</span> on the note bar (or{' '}
+          <span className="text-fg">P</span>), then click where the phrase starts on the
+          highway and again where it ends. Drawing across an existing phrase joins the two.
+          Phrases are per difficulty.
         </p>
 
         <ul className="mt-3 max-h-40 space-y-0.5 overflow-y-auto">

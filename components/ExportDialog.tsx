@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import type { Project } from '@/lib/chart/types';
 import { exportFolderName } from '@/lib/chart/naming';
+import { exportPreflight, type ExportPreflight } from '@/lib/client/api';
 
 /**
  * Export dialog.
@@ -11,9 +12,14 @@ import { exportFolderName } from '@/lib/chart/naming';
  * exposes the one real choice: OGG (small, the default) or the original audio
  * untouched. Clone Hero loads both, so this is purely a size-versus-fidelity call and
  * belongs with the user rather than buried in a config file.
+ *
+ * The preview is not guessed from the project — it comes from the server's dry run, so
+ * what you see listed is what the archive will actually contain, including the cases
+ * the client cannot know about (ffmpeg missing, album art unreadable).
  */
 
 interface Props {
+  songId: string;
   project: Project;
   open: boolean;
   exporting: boolean;
@@ -21,8 +27,22 @@ interface Props {
   onExport: (keepOriginalAudio: boolean) => void;
 }
 
-export default function ExportDialog({ project, open, exporting, onClose, onExport }: Props) {
+export default function ExportDialog({
+  songId,
+  project,
+  open,
+  exporting,
+  onClose,
+  onExport,
+}: Props) {
   const [keepOriginal, setKeepOriginal] = useState(false);
+  const [plan, setPlan] = useState<ExportPreflight | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [loadingPlan, setLoadingPlan] = useState(false);
+
+  const sourceExt = project.audio.file.slice(project.audio.file.lastIndexOf('.')).toLowerCase();
+  const alreadyOgg = sourceExt === '.ogg';
+  const effectiveKeepOriginal = keepOriginal || alreadyOgg;
 
   useEffect(() => {
     if (!open) return;
@@ -33,17 +53,43 @@ export default function ExportDialog({ project, open, exporting, onClose, onExpo
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [open, exporting, onClose]);
 
+  // Re-run the dry run whenever the dialog opens or the audio choice changes; the file
+  // list and the warnings both depend on it.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setLoadingPlan(true);
+    setPlanError(null);
+    exportPreflight(songId, effectiveKeepOriginal)
+      .then((result) => {
+        if (!cancelled) setPlan(result);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setPlan(null);
+          setPlanError(error instanceof Error ? error.message : 'Could not check the export.');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingPlan(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, songId, effectiveKeepOriginal]);
+
   if (!open) return null;
 
-  const folderName = exportFolderName(project.meta);
-  const sourceExt = project.audio.file.slice(project.audio.file.lastIndexOf('.')).toLowerCase();
-  const alreadyOgg = sourceExt === '.ogg';
-  const audioName = keepOriginal || alreadyOgg ? `song${sourceExt}` : 'song.ogg';
-  const albumName = project.album
-    ? project.album.toLowerCase().endsWith('.png')
-      ? 'album.png'
-      : 'album.jpg'
-    : null;
+  const folderName = plan?.folderName ?? exportFolderName(project.meta);
+  const fallbackAudioName = effectiveKeepOriginal ? `song${sourceExt}` : 'song.ogg';
+  const files = plan?.files ?? [
+    'notes.chart',
+    fallbackAudioName,
+    'song.ini',
+    ...(project.album ? [project.album.toLowerCase().endsWith('.png') ? 'album.png' : 'album.jpg'] : []),
+  ];
+  const warnings = plan?.warnings ?? [];
+  const leadIn = plan?.leadingSilenceMs ?? project.meta.leadingSilenceMs;
 
   return (
     <div
@@ -64,14 +110,15 @@ export default function ExportDialog({ project, open, exporting, onClose, onExpo
         <div className="space-y-4 p-4">
           {/* Preview of the exact folder structure that will be produced. */}
           <div>
-            <p className="ch-label">You will get</p>
+            <p className="ch-label">
+              You will get{loadingPlan ? ' — checking…' : ''}
+            </p>
             <div className="border border-edge2 bg-bg p-3 font-mono text-2xs">
               <p className="text-fg">{folderName}/</p>
               <ul className="mt-1 space-y-0.5 pl-4 text-muted">
-                <li>notes.chart</li>
-                <li>{audioName}</li>
-                <li>song.ini</li>
-                {albumName && <li>{albumName}</li>}
+                {files.map((file) => (
+                  <li key={file}>{file}</li>
+                ))}
               </ul>
             </div>
             <p className="mt-1 text-2xs text-faint">
@@ -79,10 +126,29 @@ export default function ExportDialog({ project, open, exporting, onClose, onExpo
             </p>
           </div>
 
+          {leadIn > 0 && (
+            <p className="text-2xs text-faint">
+              {(leadIn / 1000).toFixed(2)}s of silence is added to the start of the audio so the
+              chart lines up in game.
+            </p>
+          )}
+
+          {planError && (
+            <p className="border border-edge2 bg-bg p-2 text-2xs text-lane-red">{planError}</p>
+          )}
+
+          {warnings.length > 0 && (
+            <ul className="space-y-1 border border-edge2 bg-bg p-2 text-2xs text-lane-orange">
+              {warnings.map((warning) => (
+                <li key={warning}>— {warning}</li>
+              ))}
+            </ul>
+          )}
+
           <label className="flex cursor-pointer items-start gap-3">
             <input
               type="checkbox"
-              checked={keepOriginal || alreadyOgg}
+              checked={effectiveKeepOriginal}
               disabled={alreadyOgg}
               onChange={(event) => setKeepOriginal(event.target.checked)}
               className="mt-0.5 accent-white"
@@ -105,8 +171,8 @@ export default function ExportDialog({ project, open, exporting, onClose, onExpo
           <button
             type="button"
             className="ch-button ch-button-primary min-w-[104px]"
-            onClick={() => onExport(keepOriginal || alreadyOgg)}
-            disabled={exporting}
+            onClick={() => onExport(effectiveKeepOriginal)}
+            disabled={exporting || Boolean(planError)}
           >
             {exporting ? 'Packing…' : 'Export'}
           </button>

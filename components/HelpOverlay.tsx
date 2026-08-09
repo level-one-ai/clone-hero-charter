@@ -52,9 +52,16 @@ const GROUPS: Array<{ title: string; rows: Array<[string, string]> }> = [
       ['Alt + ← / →', 'Move down or up a fret'],
       ['F', 'Force HOPO, or force a strum'],
       ['T', 'Toggle tap notes'],
-      ['P', 'Star power phrase over the selection'],
       ['Delete', 'Remove'],
       ['Right-click', 'Context menu'],
+    ],
+  },
+  {
+    title: 'Star power',
+    rows: [
+      ['P', 'Arm the star power tool'],
+      ['Click, click', 'Set the start of the phrase, then its end'],
+      ['Esc', 'Cancel while placing'],
     ],
   },
   {

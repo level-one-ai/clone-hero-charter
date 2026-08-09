@@ -50,6 +50,12 @@ export interface HighwayInteraction {
   hoveredId: string | null;
   /** Ghost note shown where a click would place one. */
   placementGhost: { tick: number; lane: number } | null;
+  /**
+   * Star power phrase being drawn with the two-click tool. `endTick` follows the cursor
+   * until the second click lands, so the band you are dragging out looks exactly like
+   * the phrase it becomes.
+   */
+  starPowerPreview: { startTick: number; endTick: number } | null;
 }
 
 export interface RendererInput {
@@ -228,6 +234,16 @@ function drawHighway(
 
   if (interaction.placementGhost) {
     drawGhost(ctx, interaction.placementGhost, originX, tickToYLocal);
+  }
+
+  if (interaction.starPowerPreview) {
+    drawStarPowerPreview(
+      ctx,
+      interaction.starPowerPreview,
+      originX,
+      highwayWidth,
+      tickToYLocal,
+    );
   }
 
   // Fret buttons sit under the gems so a note crossing the line reads as landing ON
@@ -487,6 +503,41 @@ function drawStarPowerPhrases(
       ctx.stroke();
     }
   }
+}
+
+/**
+ * The phrase being defined by the two-click star power tool.
+ *
+ * Deliberately brighter than a committed phrase and dashed at the edges: while the tool
+ * is armed you need to tell at a glance which band is live and which are already part of
+ * the chart.
+ */
+function drawStarPowerPreview(
+  ctx: CanvasRenderingContext2D,
+  preview: { startTick: number; endTick: number },
+  originX: number,
+  highwayWidth: number,
+  tickToYLocal: (tick: number) => number,
+): void {
+  const lowTick = Math.min(preview.startTick, preview.endTick);
+  const highTick = Math.max(preview.startTick, preview.endTick);
+  const yTop = tickToYLocal(highTick);
+  const yBottom = tickToYLocal(lowTick);
+
+  ctx.fillStyle = 'rgba(127, 216, 255, 0.16)';
+  ctx.fillRect(originX, yTop, highwayWidth, yBottom - yTop);
+
+  ctx.save();
+  ctx.strokeStyle = COLORS.starPower;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([6, 4]);
+  for (const y of [yTop, yBottom]) {
+    ctx.beginPath();
+    ctx.moveTo(originX, Math.round(y) + 0.5);
+    ctx.lineTo(originX + highwayWidth, Math.round(y) + 0.5);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function drawSyncMarkers(

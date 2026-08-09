@@ -22,6 +22,13 @@ import {
 } from '@/lib/chart/types';
 import { createEditorState, editorReducer } from '@/lib/editor/projectReducer';
 import type { PlaybackClock } from '@/lib/editor/useHighwayRenderer';
+import {
+  STAR_POWER_TOOL_ARMED,
+  STAR_POWER_TOOL_OFF,
+  starPowerClick,
+  starPowerHint,
+  type StarPowerToolState,
+} from '@/lib/editor/starPowerTool';
 import { exportSong, saveChart } from '@/lib/client/api';
 
 /**
@@ -58,6 +65,7 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
   const [reimportOpen, setReimportOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<'song' | 'sync' | 'sections'>('sections');
+  const [starPowerTool, setStarPowerTool] = useState<StarPowerToolState>(STAR_POWER_TOOL_OFF);
   const [message, setMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
 
   const waveformRef = useRef<WaveformHandle | null>(null);
@@ -147,12 +155,11 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
         // Export reads what is on disk, so flush pending edits first or the zip ships
         // a chart one autosave behind what the user is looking at.
         if (projectRef.current && dirty) await save();
-        const warnings = await exportSong(projectRef.current.id, keepOriginalAudio);
+        // A navigation, not a fetch — the browser streams the zip to disk. Warnings were
+        // already shown by the dialog's dry run, so there is nothing left to report.
+        exportSong(projectRef.current.id, keepOriginalAudio);
         setExportOpen(false);
-        setMessage({
-          kind: warnings.length > 0 ? 'error' : 'info',
-          text: warnings.length > 0 ? warnings.join(' ') : 'Export downloaded.',
-        });
+        setMessage({ kind: 'info', text: 'Export started — check your downloads.' });
       } catch (error) {
         setMessage({ kind: 'error', text: `Export failed: ${(error as Error).message}` });
       } finally {
@@ -205,20 +212,37 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
     [project.tracks, trackName, selection],
   );
 
-  /** Star power spans the selection, from its first note to the end of its last. */
-  const handleStarPower = useCallback(() => {
-    if (selectedNotes.length === 0) return;
-    const start = Math.min(...selectedNotes.map((n) => n.tick));
-    const end = Math.max(...selectedNotes.map((n) => n.tick + n.length));
-    dispatch({
-      type: 'addStarPowerPhrase',
-      track: trackName,
-      tick: start,
-      // A phrase covering only an instant would not register in game, so give a
-      // zero-length selection a beat of room.
-      length: Math.max(end - start, project.resolution),
-    });
-  }, [selectedNotes, trackName, project.resolution]);
+  /**
+   * Star power is placed point to point: arm the tool, click where the phrase starts,
+   * click where it ends. It disarms itself afterwards so a stray click on the highway
+   * cannot silently create a second phrase.
+   */
+  const toggleStarPowerTool = useCallback(() => {
+    setStarPowerTool((current) => (current.active ? STAR_POWER_TOOL_OFF : STAR_POWER_TOOL_ARMED));
+    setMessage(null);
+  }, []);
+
+  const handleStarPowerClick = useCallback(
+    (tick: number) => {
+      const result = starPowerClick(starPowerTool, tick);
+      setStarPowerTool(result.state);
+      if (result.kind === 'phrase') {
+        dispatch({
+          type: 'addStarPowerPhrase',
+          track: trackName,
+          tick: result.tick,
+          length: result.length,
+        });
+        setMessage({ kind: 'info', text: 'Star power phrase added.' });
+      } else if (result.kind === 'cancelled') {
+        setMessage({
+          kind: 'error',
+          text: 'Start and end landed on the same beat, so no phrase was created.',
+        });
+      }
+    },
+    [starPowerTool, trackName],
+  );
 
   const moveFret = useCallback(
     (delta: number) => {
@@ -315,7 +339,10 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
           }
           break;
         case 'Escape':
-          dispatch({ type: 'clearSelection' });
+          // Escape backs out of whatever is in progress, innermost first: an armed
+          // star power placement before the selection.
+          if (starPowerTool.active) setStarPowerTool(STAR_POWER_TOOL_OFF);
+          else dispatch({ type: 'clearSelection' });
           break;
         case 'Home':
           event.preventDefault();
@@ -348,7 +375,7 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
           }
           break;
         case 'p':
-          handleStarPower();
+          toggleStarPowerTool();
           break;
         default:
           break;
@@ -357,7 +384,17 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [selection, trackName, togglePlay, handleSeek, save, playheadTick, moveFret, handleStarPower]);
+  }, [
+    selection,
+    trackName,
+    togglePlay,
+    handleSeek,
+    save,
+    playheadTick,
+    moveFret,
+    toggleStarPowerTool,
+    starPowerTool.active,
+  ]);
 
   const audioUrl = `/api/songs/${project.id}/audio`;
   const noteCount = project.tracks[trackName].notes.length;
@@ -472,7 +509,9 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
           }
         }}
         onDelete={() => dispatch({ type: 'deleteNotes', track: trackName, ids: [...selection] })}
-        onStarPower={handleStarPower}
+        starPowerArmed={starPowerTool.active}
+        starPowerHint={starPowerHint(starPowerTool)}
+        onToggleStarPowerTool={toggleStarPowerTool}
       />
 
       <div className="flex min-h-0 flex-1">
@@ -487,6 +526,8 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
             clockRef={clockRef}
             dispatch={dispatch}
             onSeek={handleSeek}
+            starPowerTool={starPowerTool}
+            onStarPowerClick={handleStarPowerClick}
           />
         </div>
 
@@ -551,6 +592,7 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
       </footer>
 
       <ExportDialog
+        songId={project.id}
         project={project}
         open={exportOpen}
         exporting={exporting}

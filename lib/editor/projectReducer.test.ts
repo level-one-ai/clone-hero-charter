@@ -300,3 +300,48 @@ describe('difficulty independence', () => {
     expect(state.project.tracks.MediumSingle.notes).toHaveLength(0);
   });
 });
+
+describe('star power phrases', () => {
+  const phrasesOf = (state: EditorState) => state.project.tracks[TRACK].starPower;
+
+  it('adds a phrase at the drawn region', () => {
+    let state = stateWithNotes([]);
+    state = editorReducer(state, {
+      type: 'addStarPowerPhrase',
+      track: TRACK,
+      tick: 768,
+      length: 768,
+    });
+    expect(phrasesOf(state)).toEqual([{ tick: 768, length: 768 }]);
+  });
+
+  it('merges a phrase drawn across an existing one', () => {
+    let state = stateWithNotes([]);
+    state = editorReducer(state, {
+      type: 'addStarPowerPhrase',
+      track: TRACK,
+      tick: 768,
+      length: 768,
+    });
+    // Starts inside the first phrase and runs past its end.
+    state = editorReducer(state, {
+      type: 'addStarPowerPhrase',
+      track: TRACK,
+      tick: 1200,
+      length: 768,
+    });
+    expect(phrasesOf(state)).toEqual([{ tick: 768, length: 1200 }]);
+  });
+
+  it('keeps separate phrases separate', () => {
+    let state = stateWithNotes([]);
+    state = editorReducer(state, { type: 'addStarPowerPhrase', track: TRACK, tick: 0, length: 192 });
+    state = editorReducer(state, {
+      type: 'addStarPowerPhrase',
+      track: TRACK,
+      tick: 1920,
+      length: 192,
+    });
+    expect(phrasesOf(state)).toHaveLength(2);
+  });
+});

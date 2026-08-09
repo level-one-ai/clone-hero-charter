@@ -132,10 +132,13 @@ export interface SongMeta {
    * get your bearings, and the first notes are hard to line up. Adding a lead-in
    * shifts the whole song later without touching a single note.
    *
-   * Non-destructive. The uploaded audio is never modified — the editor simply delays
-   * playback by this much so it previews the result, and the export prepends real
-   * silence with ffmpeg. midi-ch has the same setting but leaves padding the audio to
-   * you in a DAW; doing it here keeps chart and audio in step automatically.
+   * Non-destructive. The uploaded audio on disk is never modified; the export prepends
+   * real silence with ffmpeg and raises `offset` by the same amount, so every note
+   * still lands on exactly the music it was charted against — the lead-in is added in
+   * front of the song rather than sliding the chart around inside it. The editor
+   * therefore needs no change at all: what you hear against the highway is what the
+   * game plays. midi-ch has the same setting but leaves padding the audio to you in a
+   * DAW; doing it here keeps chart and audio in step automatically.
    */
   leadingSilenceMs: number;
 }

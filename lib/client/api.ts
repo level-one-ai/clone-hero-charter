@@ -150,51 +150,44 @@ export async function uploadAlbumArt(id: string, file: File): Promise<string> {
   return body.album;
 }
 
+export interface ExportPreflight {
+  folderName: string;
+  files: string[];
+  warnings: string[];
+  /** False when ffmpeg is missing or cannot read this audio, so no OGG conversion happens. */
+  transcoding: boolean;
+  leadingSilenceMs: number;
+}
+
+function exportUrl(id: string, keepOriginalAudio: boolean, extra = ''): string {
+  return `/api/songs/${id}/export?keepOriginalAudio=${keepOriginalAudio ? '1' : '0'}${extra}`;
+}
+
 /**
- * Export and trigger a download.
+ * Ask the server what the export would contain, without building it.
  *
- * The zip is streamed as a blob rather than navigating to the URL, because the route
- * is a POST (it takes options) and because a failed export should surface as an error
- * in the UI instead of a broken page.
+ * This is what makes the dialog's preview honest: the file list and the warnings come
+ * from the same `planExport` the download uses, so "ffmpeg cannot convert this, you
+ * will get the original file" is visible *before* you commit to the download rather
+ * than in a header nobody reads afterwards.
  */
-export async function exportSong(id: string, keepOriginalAudio: boolean): Promise<string[]> {
-  const response = await fetch(`/api/songs/${id}/export`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ keepOriginalAudio }),
-  });
+export async function exportPreflight(
+  id: string,
+  keepOriginalAudio: boolean,
+): Promise<ExportPreflight> {
+  return unwrap<ExportPreflight>(
+    await fetch(exportUrl(id, keepOriginalAudio, '&dryRun=1'), { cache: 'no-store' }),
+  );
+}
 
-  if (!response.ok) {
-    let message = `Export failed (${response.status})`;
-    try {
-      const body = (await response.json()) as { error?: string };
-      if (body?.error) message = body.error;
-    } catch {
-      // Body was the zip stream or empty.
-    }
-    throw new Error(message);
-  }
-
-  const rawWarnings = response.headers.get('X-Export-Warnings') ?? '';
-  const warnings = rawWarnings ? decodeURIComponent(rawWarnings).split(' | ').filter(Boolean) : [];
-
-  const disposition = response.headers.get('Content-Disposition') ?? '';
-  const utf8Match = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
-  const asciiMatch = /filename="([^"]+)"/i.exec(disposition);
-  const filename = utf8Match
-    ? decodeURIComponent(utf8Match[1])
-    : (asciiMatch?.[1] ?? 'song.zip');
-
-  const blob = await response.blob();
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  // Revoking immediately can cancel the download in Safari; one tick is enough.
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-
-  return warnings;
+/**
+ * Start the download.
+ *
+ * A plain navigation rather than fetch-to-Blob: the browser streams the zip straight to
+ * disk instead of the tab holding the whole archive — tens of megabytes for a
+ * keep-original-audio export — in memory first. `Content-Disposition` on the response
+ * supplies the filename and keeps the current page in place.
+ */
+export function exportSong(id: string, keepOriginalAudio: boolean): void {
+  window.location.href = exportUrl(id, keepOriginalAudio);
 }

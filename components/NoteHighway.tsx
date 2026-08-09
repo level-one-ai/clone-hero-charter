@@ -37,6 +37,13 @@ interface Props {
   dispatch: React.Dispatch<EditorAction>;
   /** Seek the audio to a chart-time position, used when scrubbing on the highway. */
   onSeek: (seconds: number) => void;
+  /**
+   * Star power placement tool. When armed, clicks on the highway define a phrase rather
+   * than placing or selecting notes: the first sets `startTick`, the second finishes.
+   */
+  starPowerTool: { active: boolean; startTick: number | null };
+  /** A click while the tool is armed, already snapped to the grid. */
+  onStarPowerClick: (tick: number) => void;
 }
 
 type DragState =
@@ -63,11 +70,15 @@ export default function NoteHighway({
   clockRef,
   dispatch,
   onSeek,
+  starPowerTool,
+  onStarPowerClick,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [drag, setDrag] = useState<DragState>({ kind: 'none' });
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [ghost, setGhost] = useState<{ tick: number; lane: number } | null>(null);
+  /** Snapped tick under the cursor — only tracked while the star power tool is armed. */
+  const [cursorTick, setCursorTick] = useState<number | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; noteId: string } | null>(
     null,
   );
@@ -101,8 +112,22 @@ export default function NoteHighway({
       marquee = { x0: drag.x0, y0: drag.y0, x1: drag.x1, y1: drag.y1 };
     }
 
-    return { dragPreview, sustainPreview, marquee, hoveredId, placementGhost: ghost };
-  }, [drag, track.notes, hoveredId, ghost]);
+    // While the tool is armed the highway shows nothing else: no hover highlight and no
+    // placement ghost, because neither click will place a note.
+    const starPowerPreview =
+      starPowerTool.active && starPowerTool.startTick !== null
+        ? { startTick: starPowerTool.startTick, endTick: cursorTick ?? starPowerTool.startTick }
+        : null;
+
+    return {
+      dragPreview,
+      sustainPreview,
+      marquee,
+      hoveredId: starPowerTool.active ? null : hoveredId,
+      placementGhost: starPowerTool.active ? null : ghost,
+      starPowerPreview,
+    };
+  }, [drag, track.notes, hoveredId, ghost, starPowerTool, cursorTick]);
 
   const inputRef = useRef<RendererInput>({
     project,
@@ -150,6 +175,16 @@ export default function NoteHighway({
     const position = pointerPosition(event);
     const ctx = hitContext();
     if (!position || !ctx) return;
+
+    // The star power tool takes over the whole surface while armed — anywhere on the
+    // canvas is a valid start or end, including outside the lanes, because a phrase
+    // spans every lane anyway.
+    if (starPowerTool.active) {
+      onStarPowerClick(
+        snapTick(Math.max(0, yToTick(position.y, ctx)), project.resolution, snap, timing),
+      );
+      return;
+    }
 
     canvasRef.current?.setPointerCapture(event.pointerId);
 
@@ -217,6 +252,14 @@ export default function NoteHighway({
     const position = pointerPosition(event);
     const ctx = hitContext();
     if (!position || !ctx) return;
+
+    if (starPowerTool.active) {
+      setCursorTick(
+        snapTick(Math.max(0, yToTick(position.y, ctx)), project.resolution, snap, timing),
+      );
+      if (canvasRef.current) canvasRef.current.style.cursor = 'cell';
+      return;
+    }
 
     if (drag.kind === 'none') {
       const hit = hitTestNote(track.notes, position.x, position.y, ctx);
@@ -303,6 +346,7 @@ export default function NoteHighway({
 
   const handleContextMenu = (event: React.MouseEvent<HTMLCanvasElement>) => {
     event.preventDefault();
+    if (starPowerTool.active) return; // no note menu while placing a phrase
     const position = pointerPosition(event);
     const ctx = hitContext();
     if (!position || !ctx) return;
@@ -352,6 +396,7 @@ export default function NoteHighway({
         onPointerLeave={() => {
           setHoveredId(null);
           setGhost(null);
+          setCursorTick(null);
         }}
         onContextMenu={handleContextMenu}
       />

@@ -24,7 +24,11 @@ interface Props {
   onToggleFlag: (flag: 'forced' | 'tap') => void;
   onClearSustain: () => void;
   onDelete: () => void;
-  onStarPower: () => void;
+  /** True while the two-click star power tool is waiting for clicks on the highway. */
+  starPowerArmed: boolean;
+  /** What to do next while the tool is armed, or null when it is off. */
+  starPowerHint: string | null;
+  onToggleStarPowerTool: () => void;
   totalNotes: number;
 }
 
@@ -37,7 +41,9 @@ export default function NoteToolbar({
   onToggleFlag,
   onClearSustain,
   onDelete,
-  onStarPower,
+  starPowerArmed,
+  starPowerHint,
+  onToggleStarPowerTool,
   totalNotes,
 }: Props) {
   const count = selectedNotes.length;
@@ -137,12 +143,17 @@ export default function NoteToolbar({
       </Group>
 
       <Group label="Other">
+        {/*
+          Unlike everything else on this bar, star power does not act on the selection —
+          it is a drawing tool, so it stays enabled with nothing selected and shows its
+          armed state rather than firing once and forgetting.
+        */}
         <button
           type="button"
-          className="ch-button"
-          onClick={onStarPower}
-          disabled={none}
-          title="Make a star power phrase covering the selection (P)"
+          className={`ch-button ${starPowerArmed ? 'ch-button-primary' : ''}`}
+          onClick={onToggleStarPowerTool}
+          aria-pressed={starPowerArmed}
+          title="Draw a star power phrase: click its start on the highway, then its end (P)"
         >
           Star power
         </button>
@@ -159,6 +170,15 @@ export default function NoteToolbar({
           Delete
         </button>
       </Group>
+
+      {starPowerHint && (
+        <span
+          className="ml-auto border border-lane-blue px-2 py-1 text-2xs uppercase tracking-widest"
+          style={{ color: '#7fd8ff', borderColor: '#7fd8ff' }}
+        >
+          {starPowerHint}
+        </span>
+      )}
     </div>
   );
 }

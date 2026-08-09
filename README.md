@@ -35,7 +35,17 @@ Tools and an RSA signing key) — this app does not produce them.
 and roughly ten times smaller than a lossless WAV. Clone Hero also loads `.wav`, `.mp3`
 and `.opus`, so the export dialog has a **Keep the original audio** toggle when you'd
 rather ship `song.wav` untouched. If ffmpeg is unavailable or cannot read your file,
-the export falls back to the original audio and tells you it did.
+the export falls back to the original audio and tells you it did — before the download
+starts, not after: opening the export dialog asks the server what the archive would
+contain (`GET /api/songs/<id>/export?dryRun=1`) and shows the real file list and warnings.
+
+The download itself is a plain navigation to `GET /api/songs/<id>/export`, so the browser
+streams the zip straight to disk instead of the tab buffering the whole archive in memory.
+
+**Serve the app over HTTPS.** Chrome blocks `.zip` downloads from insecure (HTTP) origins
+with *"Insecure download blocked"*. That block is correct — over plain HTTP the archive
+can be tampered with in transit — so the fix is a certificate, not a workaround. On
+Coolify: set the domain to `https://…`, tick **Generate SSL Certificate**, redeploy.
 
 ---
 
@@ -222,7 +232,7 @@ so repeated notes on one fret correctly stay strums however close together they 
 | Mouse wheel | Scrub the timeline (hold Shift to move faster) |
 | `Ctrl`/`Cmd` + `A` | Select everything in this difficulty |
 | `Alt` + `←` / `→` | Move the selection down or up a fret |
-| `P` | Star power phrase over the selection |
+| `P` | Arm the star power tool, then click the phrase's start and end |
 | `Ctrl`/`Cmd` + `Z` / `Shift+Z` | Undo / redo |
 | `Ctrl`/`Cmd` + `S` | Save now |
 
@@ -239,10 +249,17 @@ the presets), and appears on the highway as a gold line with its name in the gut
 Sections are written to the chart as `section <name>` events, which is what Clone Hero
 reads for its practice-mode list — they are what makes a long chart navigable.
 
-Star power phrases are per difficulty. Select the notes a phrase should cover and press
-**Star power** on the note bar (or `P`); the phrase spans from the first selected note to
-the end of the last. Overlapping phrases are merged automatically, since Clone Hero does
-not accept them.
+Star power phrases are per difficulty and drawn point to point, because in game a phrase
+is a region of the song rather than a set of notes. Press **Star power** on the note bar
+(or `P`) to arm the tool, click where the phrase starts on the highway, then click where
+it ends; a dashed band follows the cursor in between so you can see what you are about to
+create. The tool disarms itself after the second click, so it cannot quietly keep placing
+phrases, and `Esc` cancels mid-placement.
+
+Clicking backwards — end first — works and is normalised. Two clicks landing on the same
+snap point create nothing, since a zero-length phrase does not register in game. Drawing
+across an existing phrase merges the two, which is what Clone Hero requires, as it does
+not accept overlapping phrases.
 
 ### Lead-in silence
 
