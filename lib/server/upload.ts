@@ -185,4 +185,20 @@ export function extensionOf(filename: string): string {
 
 export const AUDIO_EXTENSIONS = ['.wav', '.ogg', '.mp3', '.opus', '.flac'];
 export const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg'];
-export const CHART_EXTENSIONS = ['.mid', '.midi', '.chart'];
+/**
+ * Reference files an import can be built from.
+ *
+ * The Guitar Pro extensions are here because GP exports of MIDI are sometimes written
+ * corrupt, and the .gp file itself is then the only usable source — see
+ * lib/server/guitarPro.ts.
+ */
+export const CHART_EXTENSIONS = [
+  '.mid',
+  '.midi',
+  '.chart',
+  '.gp3',
+  '.gp4',
+  '.gp5',
+  '.gpx',
+  '.gp',
+];

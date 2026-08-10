@@ -345,3 +345,135 @@ describe('star power phrases', () => {
     expect(phrasesOf(state)).toHaveLength(2);
   });
 });
+
+describe('range selection', () => {
+  const chart = () =>
+    stateWithNotes([
+      { tick: 0, lane: 0 },
+      { tick: 192, lane: 2 },
+      { tick: 192, lane: 4 },
+      { tick: 384, lane: 7 },
+      { tick: 960, lane: 1 },
+    ]);
+
+  it('selects every note in the range, across all lanes', () => {
+    let state = chart();
+    state = editorReducer(state, {
+      type: 'selectRange',
+      track: TRACK,
+      fromTick: 192,
+      toTick: 384,
+    });
+    expect([...state.selection].sort()).toEqual(['n1', 'n2', 'n3']);
+  });
+
+  it('is inclusive at both ends', () => {
+    let state = chart();
+    state = editorReducer(state, { type: 'selectRange', track: TRACK, fromTick: 0, toTick: 960 });
+    expect(state.selection.size).toBe(5);
+  });
+
+  it('treats a backwards range the same as a forwards one', () => {
+    const forwards = editorReducer(chart(), {
+      type: 'selectRange',
+      track: TRACK,
+      fromTick: 192,
+      toTick: 384,
+    });
+    const backwards = editorReducer(chart(), {
+      type: 'selectRange',
+      track: TRACK,
+      fromTick: 384,
+      toTick: 192,
+    });
+    expect([...backwards.selection].sort()).toEqual([...forwards.selection].sort());
+  });
+
+  it('replaces the selection unless additive', () => {
+    let state = editorReducer(chart(), { type: 'select', ids: ['n4'] });
+    state = editorReducer(state, { type: 'selectRange', track: TRACK, fromTick: 0, toTick: 0 });
+    expect([...state.selection]).toEqual(['n0']);
+
+    let additive = editorReducer(chart(), { type: 'select', ids: ['n4'] });
+    additive = editorReducer(additive, {
+      type: 'selectRange',
+      track: TRACK,
+      fromTick: 0,
+      toTick: 0,
+      additive: true,
+    });
+    expect([...additive.selection].sort()).toEqual(['n0', 'n4']);
+  });
+
+  it('touches only the named difficulty', () => {
+    let state = chart();
+    state = editorReducer(state, { type: 'addNote', track: 'HardSingle', tick: 192, lane: 0 });
+    state = editorReducer(state, { type: 'selectRange', track: TRACK, fromTick: 0, toTick: 960 });
+    expect(state.selection.size).toBe(5);
+  });
+});
+
+describe('paste', () => {
+  const pasted = (tick: number, lane: Lane, id: string) => ({
+    id,
+    tick,
+    lane,
+    length: 0,
+    forced: false,
+    tap: false,
+  });
+
+  it('inserts the notes and selects them', () => {
+    let state = stateWithNotes([{ tick: 0, lane: 0 }]);
+    state = editorReducer(state, {
+      type: 'pasteNotes',
+      track: TRACK,
+      notes: [pasted(960, 1, 'p0'), pasted(1152, 2, 'p1')],
+    });
+    expect(notesOf(state)).toHaveLength(3);
+    expect([...state.selection].sort()).toEqual(['p0', 'p1']);
+  });
+
+  it('keeps the track sorted', () => {
+    let state = stateWithNotes([{ tick: 960, lane: 0 }]);
+    state = editorReducer(state, {
+      type: 'pasteNotes',
+      track: TRACK,
+      notes: [pasted(192, 1, 'p0')],
+    });
+    expect(notesOf(state).map((n) => n.tick)).toEqual([192, 960]);
+  });
+
+  it('replaces a note it lands on rather than duplicating it', () => {
+    let state = stateWithNotes([{ tick: 192, lane: 1 }]);
+    state = editorReducer(state, {
+      type: 'pasteNotes',
+      track: TRACK,
+      notes: [pasted(192, 1, 'p0')],
+    });
+    expect(notesOf(state)).toHaveLength(1);
+    expect(notesOf(state)[0].id).toBe('p0');
+  });
+
+  it('lets a pasted open note displace frets at the same tick', () => {
+    let state = stateWithNotes([{ tick: 192, lane: 1 }, { tick: 192, lane: 3 }]);
+    state = editorReducer(state, {
+      type: 'pasteNotes',
+      track: TRACK,
+      notes: [pasted(192, 7, 'p0')],
+    });
+    expect(notesOf(state)).toHaveLength(1);
+    expect(notesOf(state)[0].lane).toBe(7);
+  });
+
+  it('is undoable in one step', () => {
+    let state = stateWithNotes([{ tick: 0, lane: 0 }]);
+    state = editorReducer(state, {
+      type: 'pasteNotes',
+      track: TRACK,
+      notes: [pasted(960, 1, 'p0'), pasted(1152, 2, 'p1')],
+    });
+    state = editorReducer(state, { type: 'undo' });
+    expect(notesOf(state)).toHaveLength(1);
+  });
+});

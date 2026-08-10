@@ -1,11 +1,14 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { NextResponse } from 'next/server';
+import { Midi } from '@tonejs/midi';
 import {
-  midiToChart,
+  convertParsedMidi,
   formatImportReport,
   type MelodyMappingOptions,
+  type ParsedMidi,
 } from '@/lib/chart/midiToChart';
+import { GUITAR_PRO_EXTENSIONS, parseGuitarPro } from '@/lib/server/guitarPro';
 import { isValidSongId, songDir } from '@/lib/server/paths';
 import { readProject, saveProject } from '@/lib/server/storage';
 
@@ -28,7 +31,44 @@ interface Params {
  * POST applies a chosen track/offset and rewrites the chart.
  */
 
-/** GET — analyse source.mid and report the options, without touching the project. */
+/**
+ * Resolve whatever source file this project was created from into a ParsedMidi.
+ *
+ * A project may have been created from a .mid or from a Guitar Pro file; re-import has to
+ * work identically either way, so the format is resolved once here and everything below
+ * works on the parsed result.
+ */
+async function loadSource(
+  id: string,
+): Promise<{ parsed: ParsedMidi; warnings: string[]; guitarPro: boolean } | { error: string }> {
+  const dir = songDir(id);
+  const candidates = ['source.mid', ...GUITAR_PRO_EXTENSIONS.map((ext) => `source${ext}`)];
+
+  for (const name of candidates) {
+    let buffer: Buffer;
+    try {
+      buffer = await fs.readFile(path.join(dir, name));
+    } catch {
+      continue;
+    }
+    if (name === 'source.mid') {
+      return { parsed: new Midi(new Uint8Array(buffer)), warnings: [], guitarPro: false };
+    }
+    try {
+      const gp = parseGuitarPro(new Uint8Array(buffer));
+      return { parsed: gp.parsed, warnings: gp.warnings, guitarPro: true };
+    } catch (error) {
+      return { error: `Could not re-read the Guitar Pro file: ${(error as Error).message}` };
+    }
+  }
+
+  return {
+    error:
+      'This project was not created from a MIDI or Guitar Pro file, so there is nothing to re-import.',
+  };
+}
+
+/** GET — analyse the stored source file and report the options, without touching the project. */
 export async function GET(_request: Request, { params }: Params) {
   const { id } = await params;
   if (!isValidSongId(id)) return NextResponse.json({ error: 'Invalid song id' }, { status: 400 });
@@ -36,20 +76,13 @@ export async function GET(_request: Request, { params }: Params) {
   const project = await readProject(id);
   if (!project) return NextResponse.json({ error: 'Song not found' }, { status: 404 });
 
-  const sourcePath = path.join(songDir(id), 'source.mid');
-  let buffer: Buffer;
-  try {
-    buffer = await fs.readFile(sourcePath);
-  } catch {
-    return NextResponse.json(
-      { error: 'This project was not created from a MIDI file, so there is nothing to re-import.' },
-      { status: 404 },
-    );
-  }
+  const source = await loadSource(id);
+  if ('error' in source) return NextResponse.json({ error: source.error }, { status: 404 });
+  const { parsed } = source;
 
   try {
     // The default (auto-detected) import, for the track list and fit scores.
-    const auto = midiToChart(new Uint8Array(buffer), id);
+    const auto = convertParsedMidi(parsed, id, source.guitarPro ? { mode: 'musical' } : {});
 
     /**
      * What each track WOULD yield if chosen. Running the full conversion per track is
@@ -58,7 +91,10 @@ export async function GET(_request: Request, { params }: Params) {
      */
     const previews = auto.report.trackSummaries.map((summary) => {
       try {
-        const attempt = midiToChart(new Uint8Array(buffer), id, { trackIndex: summary.index });
+        const attempt = convertParsedMidi(parsed, id, {
+          trackIndex: summary.index,
+          ...(source.guitarPro ? { mode: 'musical' as const } : {}),
+        });
         return {
           index: summary.index,
           name: summary.name,
@@ -161,22 +197,16 @@ export async function POST(request: Request, { params }: Params) {
       typeof raw.maxChordSize === 'number' ? Math.max(1, Math.min(5, raw.maxChordSize)) : 3,
   };
 
-  const sourcePath = path.join(songDir(id), 'source.mid');
-  let buffer: Buffer;
-  try {
-    buffer = await fs.readFile(sourcePath);
-  } catch {
-    return NextResponse.json(
-      { error: 'This project was not created from a MIDI file, so there is nothing to re-import.' },
-      { status: 404 },
-    );
-  }
+  const source = await loadSource(id);
+  if ('error' in source) return NextResponse.json({ error: source.error }, { status: 404 });
 
   try {
-    const result = midiToChart(new Uint8Array(buffer), id, {
+    const result = convertParsedMidi(source.parsed, id, {
       trackIndex,
       octaveOffset,
-      mode,
+      // A Guitar Pro score is sheet music, never the Guitar Hero note layout, so it
+      // defaults to musical mode. An explicit choice from the dialog still wins.
+      mode: mode ?? (source.guitarPro ? 'musical' : undefined),
       melody,
       resolution: existing.resolution,
     });

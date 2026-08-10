@@ -24,6 +24,10 @@ interface Props {
   onToggleFlag: (flag: 'forced' | 'tap') => void;
   onClearSustain: () => void;
   onDelete: () => void;
+  onCopy: (cut: boolean) => void;
+  onPaste: () => void;
+  /** What is on the clipboard, or null when nothing has been copied yet. */
+  clipboardLabel: string | null;
   /** True while the two-click star power tool is waiting for clicks on the highway. */
   starPowerArmed: boolean;
   /** What to do next while the tool is armed, or null when it is off. */
@@ -41,6 +45,9 @@ export default function NoteToolbar({
   onToggleFlag,
   onClearSustain,
   onDelete,
+  onCopy,
+  onPaste,
+  clipboardLabel,
   starPowerArmed,
   starPowerHint,
   onToggleStarPowerTool,
@@ -73,6 +80,41 @@ export default function NoteToolbar({
           Clear
         </button>
       </div>
+
+      <Group label="Block">
+        <button
+          type="button"
+          className="ch-button"
+          onClick={() => onCopy(false)}
+          disabled={none}
+          title="Copy the selection (Ctrl+C). Shift-click two notes to select everything between them."
+        >
+          Copy
+        </button>
+        <button
+          type="button"
+          className="ch-button"
+          onClick={() => onCopy(true)}
+          disabled={none}
+          title="Cut the selection (Ctrl+X)"
+        >
+          Cut
+        </button>
+        {/* Paste does not need a selection — only something on the clipboard. */}
+        <button
+          type="button"
+          className="ch-button"
+          onClick={onPaste}
+          disabled={!clipboardLabel}
+          title={
+            clipboardLabel
+              ? `Paste at the playhead, in this difficulty (Ctrl+V) — ${clipboardLabel}`
+              : 'Nothing copied yet'
+          }
+        >
+          Paste
+        </button>
+      </Group>
 
       <Group label="Move fret">
         <button

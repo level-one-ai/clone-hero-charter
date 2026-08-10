@@ -7,6 +7,7 @@ import HelpOverlay from './HelpOverlay';
 import NoteHighway from './NoteHighway';
 import NoteToolbar from './NoteToolbar';
 import SectionsPanel from './SectionsPanel';
+import ChartCheckPanel from './ChartCheckPanel';
 import ReimportDialog from './ReimportDialog';
 import SongPropertiesPanel from './SongPropertiesPanel';
 import SyncPanel from './SyncPanel';
@@ -21,6 +22,13 @@ import {
   type Project,
 } from '@/lib/chart/types';
 import { createEditorState, editorReducer } from '@/lib/editor/projectReducer';
+import { describeReduction, reduceNotes } from '@/lib/chart/generateDifficulty';
+import {
+  copyNotes,
+  describeBlock,
+  pasteAt,
+  type ClipboardBlock,
+} from '@/lib/editor/clipboard';
 import type { PlaybackClock } from '@/lib/editor/useHighwayRenderer';
 import {
   STAR_POWER_TOOL_ARMED,
@@ -64,8 +72,10 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
   const [exportOpen, setExportOpen] = useState(false);
   const [reimportOpen, setReimportOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [sidebarTab, setSidebarTab] = useState<'song' | 'sync' | 'sections'>('sections');
+  const [sidebarTab, setSidebarTab] = useState<'song' | 'sync' | 'sections' | 'check'>('sections');
   const [starPowerTool, setStarPowerTool] = useState<StarPowerToolState>(STAR_POWER_TOOL_OFF);
+  const clipboardRef = useRef<ClipboardBlock | null>(null);
+  const [clipboardLabel, setClipboardLabel] = useState<string | null>(null);
   const [message, setMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
 
   const waveformRef = useRef<WaveformHandle | null>(null);
@@ -244,6 +254,42 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
     [starPowerTool, trackName],
   );
 
+  /**
+   * Fill the current difficulty by thinning Expert.
+   *
+   * Destructive, so it confirms when there is work to lose. Expert's star power phrases
+   * come along, since a phrase is a passage of the song rather than of one difficulty.
+   */
+  const handleGenerateDifficulty = useCallback(() => {
+    if (difficulty === 'Expert') return;
+    const expert = project.tracks.ExpertSingle;
+    if (expert.notes.length === 0) {
+      setMessage({ kind: 'error', text: 'Chart Expert first — there is nothing to reduce.' });
+      return;
+    }
+    const existing = project.tracks[trackName].notes.length;
+    if (
+      existing > 0 &&
+      !window.confirm(
+        `${difficulty} already has ${existing} notes. Generating replaces them all. Continue?`,
+      )
+    ) {
+      return;
+    }
+
+    const notes = reduceNotes(expert.notes, project.resolution, difficulty);
+    dispatch({
+      type: 'replaceTrack',
+      track: trackName,
+      notes,
+      starPower: expert.starPower.map((phrase) => ({ ...phrase })),
+    });
+    setMessage({
+      kind: 'info',
+      text: `${describeReduction(expert.notes.length, notes.length, difficulty)}. Undo if it is not what you wanted.`,
+    });
+  }, [difficulty, trackName, project.tracks, project.resolution]);
+
   const moveFret = useCallback(
     (delta: number) => {
       if (selection.size === 0) return;
@@ -287,6 +333,53 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
     [displayTime, timing, project.resolution, snap],
   );
 
+  /**
+   * Copy (or cut) the selection.
+   *
+   * The block lives in a ref, not state: it changes nothing on screen, and putting it in
+   * state would re-render the whole editor on every copy. `clipboardLabel` mirrors it for
+   * the toolbar, which is the only part that needs to re-render.
+   */
+  const handleCopy = useCallback(
+    (cut: boolean) => {
+      const block = copyNotes(selectedNotes);
+      if (!block) {
+        setMessage({ kind: 'error', text: 'Select some notes first — nothing to copy.' });
+        return;
+      }
+      clipboardRef.current = block;
+      setClipboardLabel(describeBlock(block, project.resolution));
+      if (cut) {
+        dispatch({ type: 'deleteNotes', track: trackName, ids: selectedNotes.map((n) => n.id) });
+      }
+      setMessage({
+        kind: 'info',
+        text: `${cut ? 'Cut' : 'Copied'} ${block.notes.length} note${block.notes.length === 1 ? '' : 's'}. Paste with Ctrl+V at the playhead.`,
+      });
+    },
+    [selectedNotes, trackName, project.resolution],
+  );
+
+  /**
+   * Paste at the playhead, into whichever difficulty is open.
+   *
+   * Pasting into a different difficulty from the one copied is the point, not an
+   * accident: copy Expert, switch to Hard, paste, then thin it out.
+   */
+  const handlePaste = useCallback(() => {
+    const block = clipboardRef.current;
+    if (!block) {
+      setMessage({ kind: 'error', text: 'Nothing copied yet — select notes and press Ctrl+C.' });
+      return;
+    }
+    const notes = pasteAt(block, playheadTick);
+    dispatch({ type: 'pasteNotes', track: trackName, notes });
+    setMessage({
+      kind: 'info',
+      text: `Pasted ${notes.length} note${notes.length === 1 ? '' : 's'} into ${difficulty}.`,
+    });
+  }, [playheadTick, trackName, difficulty]);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -313,6 +406,16 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
       if (mod && event.key.toLowerCase() === 'a') {
         event.preventDefault();
         dispatch({ type: 'selectAll', track: trackName });
+        return;
+      }
+      if (mod && (event.key.toLowerCase() === 'c' || event.key.toLowerCase() === 'x')) {
+        event.preventDefault();
+        handleCopy(event.key.toLowerCase() === 'x');
+        return;
+      }
+      if (mod && event.key.toLowerCase() === 'v') {
+        event.preventDefault();
+        handlePaste();
         return;
       }
       if (mod) return;
@@ -475,6 +578,25 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
               </button>
             );
           })}
+          {/*
+            Generating sits with the difficulty tabs because that is where you are when
+            you notice Hard is empty. It replaces the difficulty, so it asks first.
+          */}
+          {difficulty !== 'Expert' && (
+            <button
+              type="button"
+              className="ch-button my-1 ml-3 self-center"
+              onClick={handleGenerateDifficulty}
+              disabled={project.tracks.ExpertSingle.notes.length === 0}
+              title={
+                project.tracks.ExpertSingle.notes.length === 0
+                  ? 'Chart Expert first — there is nothing to reduce'
+                  : `Fill ${difficulty} by thinning the Expert chart`
+              }
+            >
+              Generate from Expert
+            </button>
+          )}
         </nav>
 
         <label className="ml-auto flex items-center gap-2 py-1.5">
@@ -509,6 +631,9 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
           }
         }}
         onDelete={() => dispatch({ type: 'deleteNotes', track: trackName, ids: [...selection] })}
+        onCopy={handleCopy}
+        onPaste={handlePaste}
+        clipboardLabel={clipboardLabel}
         starPowerArmed={starPowerTool.active}
         starPowerHint={starPowerHint(starPowerTool)}
         onToggleStarPowerTool={toggleStarPowerTool}
@@ -533,20 +658,31 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
 
         <aside className="flex w-72 shrink-0 flex-col border-l border-edge bg-panel">
           <nav className="flex shrink-0 border-b border-edge">
-            {(['sections', 'song', 'sync'] as const).map((tab) => (
+            {(['sections', 'song', 'sync', 'check'] as const).map((tab) => (
               <button
                 key={tab}
                 type="button"
                 onClick={() => setSidebarTab(tab)}
                 className={`ch-tab flex-1 ${sidebarTab === tab ? 'ch-tab-active' : ''}`}
               >
-                {tab === 'sections' ? 'Chart' : tab === 'song' ? 'Song' : 'Sync'}
+                {tab === 'sections'
+                  ? 'Chart'
+                  : tab === 'song'
+                    ? 'Song'
+                    : tab === 'sync'
+                      ? 'Sync'
+                      : 'Check'}
               </button>
             ))}
           </nav>
 
           <div className="min-h-0 flex-1 overflow-y-auto">
-            {sidebarTab === 'sections' ? (
+            {sidebarTab === 'check' ? (
+              <ChartCheckPanel
+                project={project}
+                onSeekToTick={(tick) => handleSeek(timing.tickToSec(tick))}
+              />
+            ) : sidebarTab === 'sections' ? (
               <SectionsPanel
                 project={project}
                 trackName={trackName}

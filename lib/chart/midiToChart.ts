@@ -244,12 +244,44 @@ export interface MidiImportOptions {
 // Conversion
 // ---------------------------------------------------------------------------
 
+/**
+ * The subset of a parsed MIDI file this converter actually reads.
+ *
+ * Naming it as an interface is what lets a Guitar Pro file take the same path:
+ * `lib/server/guitarPro.ts` produces this shape from alphaTab's score model, so track
+ * scoring, musical mode, the note histogram and the import report all work identically
+ * for .gp files without a second implementation. `@tonejs/midi` satisfies it as-is.
+ */
+export interface ParsedMidi {
+  name?: string;
+  header: {
+    ppq: number;
+    tempos: { ticks: number; bpm: number }[];
+    timeSignatures: { ticks: number; timeSignature: number[] }[];
+  };
+  tracks: {
+    name: string;
+    notes: { ticks: number; durationTicks: number; midi: number }[];
+  }[];
+}
+
 export function midiToChart(
   data: Uint8Array | ArrayBuffer,
   id: string,
   options: MidiImportOptions = {},
 ): MidiImportResult {
-  const midi = new Midi(data instanceof Uint8Array ? data : new Uint8Array(data));
+  return convertParsedMidi(
+    new Midi(data instanceof Uint8Array ? data : new Uint8Array(data)),
+    id,
+    options,
+  );
+}
+
+export function convertParsedMidi(
+  midi: ParsedMidi,
+  id: string,
+  options: MidiImportOptions = {},
+): MidiImportResult {
   const resolution = options.resolution ?? DEFAULT_RESOLUTION;
   const warnings: string[] = [];
 
@@ -395,21 +427,35 @@ export function midiToChart(
    * file held hundreds of notes.
    */
   if (selectedIndex < 0 || mode === 'musical') {
-    let best = -1;
-    let bestCount = 0;
-    midi.tracks.forEach((track, index) => {
-      if (track.notes.length > bestCount) {
-        bestCount = track.notes.length;
-        best = index;
-      }
-    });
+    let best = selectedIndex;
+    /**
+     * Densest track — but ONLY as a last resort. A name match above already knows better:
+     * a Guitar Pro file names its tracks, and "Guitar 1" is the part we want even though
+     * "Drums" has half again as many notes. Forcing musical mode says the pitches are
+     * music, not fret numbers; it says nothing about which instrument to chart.
+     */
+    if (best < 0) {
+      let bestCount = 0;
+      midi.tracks.forEach((track, index) => {
+        if (track.notes.length > bestCount) {
+          bestCount = track.notes.length;
+          best = index;
+        }
+      });
+    }
     if (best >= 0) {
+      const keptName = selectedIndex === best && selectionReason !== '';
       selectedIndex = best;
       musicalMode = true;
-      selectionReason =
-        mode === 'musical'
-          ? `musical mode: frets derived from the melody in "${midi.tracks[best].name || `track ${best}`}"`
-          : `no track uses the chart note layout, so this was read as a transcription; frets derived from the melody in "${midi.tracks[best].name || `track ${best}`}"`;
+      const label = midi.tracks[best].name || `track ${best}`;
+      if (keptName) {
+        selectionReason = `${selectionReason}; read as a transcription, so frets were derived from the melody`;
+      } else {
+        selectionReason =
+          mode === 'musical'
+            ? `musical mode: frets derived from the melody in "${label}"`
+            : `no track uses the chart note layout, so this was read as a transcription; frets derived from the melody in "${label}"`;
+      }
       if (mode !== 'musical') {
         warnings.push(
           'This is a transcription of the song, not a Guitar Hero chart — its note numbers are pitches, not fret colours. The timing and tempo have been imported exactly, and the frets were derived from those pitches (low pitches on green, high on orange). Adjust the lanes for playability, or change the mapping under Song → Re-import from MIDI.',

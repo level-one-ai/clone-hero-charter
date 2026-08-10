@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { Project } from '@/lib/chart/types';
 import { exportFolderName } from '@/lib/chart/naming';
 import { exportFileUrl, exportPreflight, type ExportPreflight } from '@/lib/client/api';
+import { countBySeverity, summariseIssues, validateChart } from '@/lib/chart/validateChart';
 
 /**
  * Export dialog.
@@ -49,6 +50,12 @@ export default function ExportDialog({
   useEffect(() => {
     setSecureContext(window.isSecureContext);
   }, []);
+
+  const chartIssues = useMemo(
+    () => validateChart(project, { durationMs: project.audio.durationMs }),
+    [project],
+  );
+  const issueCounts = countBySeverity(chartIssues);
 
   const sourceExt = project.audio.file.slice(project.audio.file.lastIndexOf('.')).toLowerCase();
   const alreadyOgg = sourceExt === '.ogg';
@@ -171,6 +178,28 @@ export default function ExportDialog({
               {(leadIn / 1000).toFixed(2)}s of silence is added to the start of the audio so the
               chart lines up in game.
             </p>
+          )}
+
+          {/*
+            The chart check, summarised. Advisory: it never blocks the export, but a
+            problem is far cheaper to find here than halfway through the song in game.
+          */}
+          {chartIssues.length > 0 && (
+            <div className="border border-edge2 bg-bg p-2 text-2xs">
+              <p className={issueCounts.errors > 0 ? 'text-lane-red' : 'text-lane-orange'}>
+                Chart check: {summariseIssues(chartIssues)}
+              </p>
+              <ul className="mt-1 space-y-0.5 text-muted">
+                {chartIssues.slice(0, 3).map((issue, index) => (
+                  <li key={`${issue.message}-${index}`}>— {issue.message}</li>
+                ))}
+              </ul>
+              {chartIssues.length > 3 && (
+                <p className="mt-1 text-faint">
+                  {chartIssues.length - 3} more in the Check tab.
+                </p>
+              )}
+            </div>
           )}
 
           {planError && (

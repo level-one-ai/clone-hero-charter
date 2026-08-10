@@ -41,7 +41,17 @@ export type EditorAction =
   | { type: 'setNotesLane'; track: TrackName; ids: string[]; lane: Lane }
   | { type: 'select'; ids: string[]; additive?: boolean }
   | { type: 'selectAll'; track: TrackName }
+  /**
+   * Select every note in a tick range, across all lanes — what shift-clicking a second
+   * note produces. A range is a slice of the SONG, not of one lane, because that is what
+   * "select this section" means when you are looking at the highway.
+   */
+  | { type: 'selectRange'; track: TrackName; fromTick: number; toTick: number; additive?: boolean }
   | { type: 'clearSelection' }
+  /** Insert a copied block; the pasted notes end up selected. */
+  | { type: 'pasteNotes'; track: TrackName; notes: Note[] }
+  /** Replace a difficulty wholesale — used by difficulty generation. */
+  | { type: 'replaceTrack'; track: TrackName; notes: Note[]; starPower: Project['tracks'][TrackName]['starPower'] }
   | { type: 'addStarPowerPhrase'; track: TrackName; tick: number; length: number }
   | { type: 'deleteStarPowerPhrase'; track: TrackName; tick: number }
   | { type: 'upsertEvent'; tick: number; text: string }
@@ -105,6 +115,18 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
       return { ...state, selection: new Set(ids) };
     }
 
+    case 'selectRange': {
+      // Normalised, so shift-clicking backwards up the highway works exactly as well as
+      // forwards — which is how you select a section you have just scrolled past.
+      const from = Math.min(action.fromTick, action.toTick);
+      const to = Math.max(action.fromTick, action.toTick);
+      const selection = action.additive ? new Set(state.selection) : new Set<string>();
+      for (const note of state.project.tracks[action.track].notes) {
+        if (note.tick >= from && note.tick <= to) selection.add(note.id);
+      }
+      return { ...state, selection };
+    }
+
     case 'clearSelection':
       return state.selection.size === 0 ? state : { ...state, selection: new Set() };
 
@@ -147,7 +169,12 @@ export function editorReducer(state: EditorState, action: EditorAction): EditorS
     past: isHistoryAction(action) ? [...state.past, state.project].slice(-MAX_HISTORY) : state.past,
     // Any new edit invalidates the redo branch.
     future: [],
-    selection: pruneSelection(state.selection, project),
+    // A paste selects what it just pasted, so the block can be nudged or flagged
+    // immediately without hunting for it again.
+    selection:
+      action.type === 'pasteNotes'
+        ? pruneSelection(new Set(action.notes.map((n) => n.id)), project)
+        : pruneSelection(state.selection, project),
     dirty: true,
   };
 }
@@ -177,6 +204,24 @@ function applyEdit(project: Project, action: EditorAction): Project {
       const removed = new Set(conflicting.map((n) => n.id));
       const notes = track.notes.filter((n) => !removed.has(n.id)).concat(note);
       return withTrack(project, action.track, sortNotes(notes), track.starPower);
+    }
+
+    case 'pasteNotes': {
+      if (action.notes.length === 0) return project;
+      const track = project.tracks[action.track];
+      // The pasted notes are the "moved" set, so dedupeNotes resolves every collision in
+      // their favour — including the open-note rule, where an open note displaces frets
+      // at its tick and vice versa. Pasting over existing notes replaces them, which is
+      // what dragging one note onto another already does.
+      const pastedIds = new Set(action.notes.map((n) => n.id));
+      const notes = dedupeNotes(sortNotes([...track.notes, ...action.notes]), pastedIds);
+      return withTrack(project, action.track, notes, track.starPower);
+    }
+
+    case 'replaceTrack': {
+      const track = project.tracks[action.track];
+      if (track.notes.length === 0 && action.notes.length === 0) return project;
+      return withTrack(project, action.track, sortNotes(action.notes), action.starPower);
     }
 
     case 'moveNotes': {

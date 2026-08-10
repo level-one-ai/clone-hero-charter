@@ -14,6 +14,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@coderline/alphatab": "^1.8.4",
     "@tonejs/midi": "^2.0.28",
     "archiver": "^7.0.1",
     "busboy": "^1.6.0",

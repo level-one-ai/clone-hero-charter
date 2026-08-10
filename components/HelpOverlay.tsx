@@ -39,8 +39,9 @@ const GROUPS: Array<{ title: string; rows: Array<[string, string]> }> = [
   {
     title: 'Selecting',
     rows: [
-      ['Click a note', 'Select it'],
-      ['Shift / Ctrl + click', 'Add to or remove from the selection'],
+      ['Click a note', 'Select it, and anchor a range here'],
+      ['Shift + click', 'Select everything between the anchor and this note'],
+      ['Ctrl / Cmd + click', 'Add or remove just this note'],
       ['Shift + drag', 'Marquee select'],
       ['Ctrl / Cmd + A', 'Select everything in this difficulty'],
       ['Esc', 'Clear the selection'],
@@ -54,6 +55,14 @@ const GROUPS: Array<{ title: string; rows: Array<[string, string]> }> = [
       ['T', 'Toggle tap notes'],
       ['Delete', 'Remove'],
       ['Right-click', 'Context menu'],
+    ],
+  },
+  {
+    title: 'Copy and paste',
+    rows: [
+      ['Ctrl / Cmd + C', 'Copy the selection'],
+      ['Ctrl / Cmd + X', 'Cut the selection'],
+      ['Ctrl / Cmd + V', 'Paste at the playhead, in this difficulty'],
     ],
   },
   {

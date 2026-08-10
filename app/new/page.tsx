@@ -142,8 +142,8 @@ export default function NewSongPage() {
               <FilePicker
                 name="reference"
                 label="Reference Chart"
-                accept=".mid,.midi,.chart"
-                hint="Optional. A .mid is converted to a chart; a .chart is imported directly."
+                accept=".mid,.midi,.chart,.gp3,.gp4,.gp5,.gpx,.gp"
+                hint="Optional. A .mid or Guitar Pro file (.gp3–.gp7) is converted to a chart; a .chart is imported directly."
                 filename={referenceName}
                 onChange={setReferenceName}
               />

@@ -79,6 +79,21 @@ export default function NoteHighway({
   const [ghost, setGhost] = useState<{ tick: number; lane: number } | null>(null);
   /** Snapped tick under the cursor — only tracked while the star power tool is armed. */
   const [cursorTick, setCursorTick] = useState<number | null>(null);
+  /**
+   * Tick of the last note clicked without shift — the fixed end of a shift-click range.
+   * A ref rather than state: it never affects what is drawn, only what the next click
+   * means.
+   */
+  const anchorTickRef = useRef<number | null>(null);
+
+  // A range is meaningless once the selection is gone or the difficulty changed, and a
+  // stale anchor would make the next shift-click select a surprising span.
+  useEffect(() => {
+    if (selection.size === 0) anchorTickRef.current = null;
+  }, [selection]);
+  useEffect(() => {
+    anchorTickRef.current = null;
+  }, [trackName]);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; noteId: string } | null>(
     null,
   );
@@ -209,15 +224,42 @@ export default function NoteHighway({
         return;
       }
 
-      // Clicking an unselected note selects it; clicking a selected one keeps the
-      // whole selection so a multi-note drag works without a modifier.
-      const additive = event.shiftKey || event.ctrlKey || event.metaKey;
-      const alreadySelected = selection.has(hit.note.id);
-      if (!alreadySelected || additive) {
-        dispatch({ type: 'select', ids: [hit.note.id], additive });
+      /**
+       * Modifier rules, matching every file explorer and DAW:
+       *
+       *   click          select this note alone, and remember it as the anchor
+       *   shift+click    select everything between the anchor and this note
+       *   ctrl/cmd+click add or remove this one note
+       *
+       * Shift is range rather than additive because selecting a passage is the common
+       * operation by a wide margin, and ctrl is the conventional home for "just this
+       * one". Shift+DRAG on empty space is still the marquee — a drag and a click are
+       * distinguishable, so the two never collide.
+       */
+      const toggle = event.ctrlKey || event.metaKey;
+      const anchorTick = anchorTickRef.current;
+
+      if (event.shiftKey && !toggle && anchorTick !== null) {
+        dispatch({
+          type: 'selectRange',
+          track: trackName,
+          fromTick: anchorTick,
+          toTick: hit.note.tick,
+        });
+        // The anchor stays put, so you can widen or narrow the range by shift-clicking
+        // again rather than starting over.
+        return;
       }
 
-      const ids = additive
+      const alreadySelected = selection.has(hit.note.id);
+      if (!alreadySelected || toggle) {
+        dispatch({ type: 'select', ids: [hit.note.id], additive: toggle });
+      }
+      anchorTickRef.current = hit.note.tick;
+
+      // A range selection is a selection, not a drag: returning above means shift-click
+      // never starts one. Plain and ctrl clicks still can.
+      const ids = toggle
         ? [...new Set([...selection, hit.note.id])]
         : alreadySelected
           ? [...selection]

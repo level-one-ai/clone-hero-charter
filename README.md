@@ -31,6 +31,25 @@ Clone Hero does not run on Xbox 360. Xbox 360 customs are signed CON/STFS packag
 containing `.mid` + `.mogg` + a DTA file, built with a separate toolchain (C3 CON
 Tools and an RSA signing key) — this app does not produce them.
 
+**Guitar Pro files.** As well as `.mid` and `.chart`, the reference-file slot accepts
+`.gp3`, `.gp4`, `.gp5`, `.gpx` and `.gp` — useful because Guitar Pro's own MIDI export is
+sometimes written corrupt, leaving the `.gp` file as the only usable source.
+
+Parsing is done in-process by [alphaTab](https://alphatab.net), which is where the
+well-known GuitarPro-to-Midi CLI's importers were ported from — same lineage, same
+formats, but a plain npm dependency with no native code, so it needs no Docker changes and
+works in development. alphaTab's *MIDI file writer* has known output bugs, so we never ask
+for one: its generator runs into an in-memory event list that we read directly.
+
+Two things come free from going through the score model rather than a MIDI file: the track
+picker shows real names ("Rhythm and Lead Guitar") instead of "track 4", and the song
+title, artist and album are read from the file to prefill the form.
+
+A Guitar Pro score is sheet music, never the Guitar Hero note layout, so these files are
+always imported in musical mode — the pitches are mapped to frets by contour. The track is
+still chosen by name where possible, so a file with "Guitar 1" and "Drums" charts the
+guitar even though the drums have more notes.
+
 **Audio format.** Exports transcode to OGG Vorbis by default — the community standard,
 and roughly ten times smaller than a lossless WAV. Clone Hero also loads `.wav`, `.mp3`
 and `.opus`, so the export dialog has a **Keep the original audio** toggle when you'd
@@ -257,6 +276,9 @@ so repeated notes on one fret correctly stay strums however close together they 
 | `Home` | Jump to the start |
 | Mouse wheel | Scrub the timeline (hold Shift to move faster) |
 | `Ctrl`/`Cmd` + `A` | Select everything in this difficulty |
+| Shift + click a note | Select everything between it and the last note you clicked |
+| `Ctrl`/`Cmd` + click | Add or remove a single note |
+| `Ctrl`/`Cmd` + `C` / `X` / `V` | Copy / cut / paste a block |
 | `Alt` + `←` / `→` | Move the selection down or up a fret |
 | `P` | Arm the star power tool, then click the phrase's start and end |
 | `Ctrl`/`Cmd` + `Z` / `Shift+Z` | Undo / redo |
@@ -267,6 +289,57 @@ is behind the **?** in the transport bar.
 
 Edits autosave 1.5 seconds after you stop, and the tab warns before closing with
 unsaved changes.
+
+### Selecting a passage, and copy/paste
+
+Click a note to select it — that also anchors a range. **Shift-click** a second note and
+everything between the two is selected, across all five lanes plus open notes, because a
+range is a slice of the song rather than of one lane. `Ctrl`/`Cmd` + click adds or removes
+a single note. Shift + drag on empty space is still the marquee.
+
+`Ctrl+C` copies the selection, `Ctrl+X` cuts it, `Ctrl+V` pastes at the playhead **in
+whichever difficulty is open**. A block keeps its lanes, sustains, chord shapes and
+tap/forced flags, and is stored relative to its own first note, so it lands intact
+wherever you put it. Pasting over existing notes replaces them.
+
+Copying into a different difficulty is the point rather than an accident: copy the Expert
+chorus, switch to Hard, paste, thin it out.
+
+Star power, sections and tempo are deliberately not part of a copied block. They belong to
+the song rather than to a run of notes, and pasting should never quietly change phrasing
+somewhere you are not looking.
+
+### Generating lower difficulties
+
+Chart Expert, then open Hard, Medium or Easy and press **Generate from Expert**. Chords
+are opened up, notes that fall too close together are dropped, and the lane count narrows
+as the difficulty drops (five frets on Hard, four on Medium, three on Easy).
+
+Reduction only ever *removes*: every generated note exists in Expert at the same tick, on
+a lane Expert used or folded inward from it. Nothing is invented, so a generated
+difficulty can never drift out of time with the song. Notes on strong beats survive in
+preference to off-beat ones, and a reduced chord keeps its lowest lane so the line stays
+melodically coherent.
+
+It replaces the difficulty, so it asks first, and it is a single undo away. Treat the
+result as a starting point to review rather than a finished chart.
+
+### The chart check
+
+The **Check** tab lists what would break the song in game while still loading fine — the
+mistakes Clone Hero says nothing about:
+
+- notes past the end of the audio
+- an open note sharing a tick with fret notes (invalid)
+- two notes stacked on one fret at one moment
+- sustains too short to register
+- a sustain running into the next note on the same fret
+- a star power phrase containing no notes, which can never be activated
+- no BPM marker at the start, or an empty Expert chart
+
+Click an issue to jump the playhead to it. A summary also appears in the export dialog.
+None of it blocks an export — it is your chart, and the tool's job is to tell you, not to
+argue.
 
 ### Sections and star power
 

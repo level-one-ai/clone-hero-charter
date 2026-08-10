@@ -2,7 +2,13 @@ import { NextResponse } from 'next/server';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { createEmptyProject, type Project } from '@/lib/chart/types';
-import { midiToChart, formatImportReport, type MidiImportReport } from '@/lib/chart/midiToChart';
+import {
+  convertParsedMidi,
+  midiToChart,
+  formatImportReport,
+  type MidiImportReport,
+} from '@/lib/chart/midiToChart';
+import { isGuitarProExtension, parseGuitarPro } from '@/lib/server/guitarPro';
 import { parseChart } from '@/lib/chart/parseChart';
 import { probeAudio } from '@/lib/server/audio';
 import { songDir } from '@/lib/server/paths';
@@ -57,8 +63,15 @@ export async function POST(request: Request) {
 
     const title = (fields.title ?? '').trim();
     const artist = (fields.artist ?? '').trim();
-    if (!title) return bad('Song title is required');
-    if (!artist) return bad('Artist is required');
+    // Title and artist are required, but a Guitar Pro file carries its own — so the
+    // check is deferred until after the import for those, and only fails if the file
+    // turns out not to name the song either. Demanding a title the user is about to
+    // upload anyway would be busywork.
+    const referenceIsGuitarPro = files.some(
+      (f) => f.field === 'reference' && isGuitarProExtension(extensionOf(f.filename)),
+    );
+    if (!title && !referenceIsGuitarPro) return bad('Song title is required');
+    if (!artist && !referenceIsGuitarPro) return bad('Artist is required');
 
     const yearRaw = (fields.year ?? '').trim();
     let year: number | null = null;
@@ -77,7 +90,9 @@ export async function POST(request: Request) {
     const referenceFile = files.find((f) => f.field === 'reference');
     const referenceExt = referenceFile ? extensionOf(referenceFile.filename) : '';
     if (referenceFile && !CHART_EXTENSIONS.includes(referenceExt)) {
-      return bad(`Reference file must be .mid or .chart, got "${referenceExt || referenceFile.filename}"`);
+      return bad(
+        `Reference file must be ${CHART_EXTENSIONS.join(', ')}, got "${referenceExt || referenceFile.filename}"`,
+      );
     }
 
     const albumArtFile = files.find((f) => f.field === 'albumArt');
@@ -91,9 +106,36 @@ export async function POST(request: Request) {
     // ---- build the project model from the reference file, if any ----------------
     let project: Project;
     let midiReport: MidiImportReport | null = null;
+    let gpMeta: { title: string; artist: string; album: string } | null = null;
     const warnings: string[] = [];
 
-    if (referenceFile && (referenceExt === '.mid' || referenceExt === '.midi')) {
+    if (referenceFile && isGuitarProExtension(referenceExt)) {
+      // Guitar Pro files go through alphaTab's score model and then down exactly the
+      // same path as a MIDI file, so track picking, musical mode and the import report
+      // all behave identically — see lib/server/guitarPro.ts.
+      const buffer = await fs.readFile(referenceFile.tempPath);
+      try {
+        const gp = parseGuitarPro(new Uint8Array(buffer));
+        /**
+         * Always musical mode. The chart-fit heuristic exists to spot MIDI files written
+         * in the Guitar Hero note layout (Expert at 96, Hard at 84 and so on) — a
+         * charting convention. A Guitar Pro file is sheet music: its pitches are the
+         * notes the guitarist plays. Letting the heuristic guess means a transcription
+         * that happens to sit in the 60-100 range gets shredded across difficulties,
+         * which is exactly what "Astronomy" did before this line.
+         */
+        const result = convertParsedMidi(gp.parsed, id, { mode: 'musical' });
+        project = result.project;
+        midiReport = result.report;
+        warnings.push(...gp.warnings, ...result.report.warnings);
+        // The file knows its own title and artist; remember them so the empty form
+        // fields below can fall back to them rather than to nothing.
+        gpMeta = gp.meta;
+        console.log(`[gp-import ${id}] ${referenceExt}\n${formatImportReport(result.report)}`);
+      } catch (error) {
+        return bad(`Could not read that Guitar Pro file: ${(error as Error).message}`);
+      }
+    } else if (referenceFile && (referenceExt === '.mid' || referenceExt === '.midi')) {
       const buffer = await fs.readFile(referenceFile.tempPath);
       try {
         const result = midiToChart(new Uint8Array(buffer), id);
@@ -118,11 +160,26 @@ export async function POST(request: Request) {
       project = createEmptyProject(id);
     }
 
-    // Form metadata always wins over whatever the reference file claimed.
+    // The form wins over the file, but a Guitar Pro file carries its own title, artist
+    // and album — so an empty form field falls back to what the file says rather than
+    // leaving the user to retype what they already have.
     project.id = id;
-    project.meta.name = title;
-    project.meta.artist = artist;
-    project.meta.album = (fields.album ?? '').trim();
+    project.meta.name = title || gpMeta?.title || project.meta.name;
+    project.meta.artist = artist || gpMeta?.artist || project.meta.artist;
+    project.meta.album = (fields.album ?? '').trim() || gpMeta?.album || '';
+    // Plenty of Guitar Pro files leave the artist or even the title blank. Rejecting an
+    // otherwise perfect import over a missing text field would be absurd, so fall back
+    // and say so — both are editable in Song Properties.
+    if (!project.meta.name.trim()) {
+      project.meta.name = referenceFile
+        ? referenceFile.filename.replace(/\.[^.]+$/, '')
+        : 'Untitled';
+      warnings.push(`The file did not name the song, so the title was set to "${project.meta.name}".`);
+    }
+    if (!project.meta.artist.trim()) {
+      project.meta.artist = 'Unknown Artist';
+      warnings.push('The file did not name the artist. Set it in Song Properties before exporting.');
+    }
     project.meta.year = year;
     project.meta.charter = (fields.charter ?? '').trim();
 
@@ -154,7 +211,12 @@ export async function POST(request: Request) {
     // Keep the original reference file so the import can be repeated later with
     // different settings (e.g. a corrected octave offset) without a re-upload.
     if (referenceFile) {
-      const sourceName = referenceExt === '.chart' ? 'source.chart' : 'source.mid';
+      const sourceName =
+        referenceExt === '.chart'
+          ? 'source.chart'
+          : isGuitarProExtension(referenceExt)
+            ? `source${referenceExt}`
+            : 'source.mid';
       await commitUploadedFile(referenceFile.tempPath, path.join(dir, sourceName));
     }
 
