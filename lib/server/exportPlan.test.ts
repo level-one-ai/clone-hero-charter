@@ -18,27 +18,29 @@ function planWith(overrides: Partial<ExportPlan> = {}): ExportPlan {
     folderName: 'Volumes - Bad Habit (MilfMilker)',
     audioPath: '/data/songs/abc123/audio.mp3',
     audioExt: '.mp3',
-    alreadyOgg: false,
+    audioFormat: 'wav',
+    copyAudioVerbatim: false,
     canTranscode: true,
     leadingSilenceMs: 0,
     durationMs: 200_000,
     warnings: [],
-    files: ['notes.chart', 'song.ogg', 'song.ini'],
+    files: ['notes.mid', 'song.wav', 'song.ini'],
     ...overrides,
   };
 }
 
 describe('exportAudioName', () => {
-  it('is song.ogg when transcoding', () => {
-    expect(exportAudioName(true, false, '.mp3')).toBe('song.ogg');
+  it('is song.wav for the default format', () => {
+    expect(exportAudioName(true, 'wav', '.mp3')).toBe('song.wav');
   });
 
-  it('keeps the original extension when not transcoding', () => {
-    expect(exportAudioName(false, false, '.wav')).toBe('song.wav');
+  it('is song.ogg when OGG was asked for', () => {
+    expect(exportAudioName(true, 'ogg', '.mp3')).toBe('song.ogg');
   });
 
-  it('does not double up on an ogg source', () => {
-    expect(exportAudioName(false, true, '.ogg')).toBe('song.ogg');
+  it('falls back to the source extension when ffmpeg cannot convert', () => {
+    expect(exportAudioName(false, 'wav', '.mp3')).toBe('song.mp3');
+    expect(exportAudioName(false, 'wav', '.opus')).toBe('song.opus');
   });
 });
 
@@ -68,10 +70,12 @@ describe('exportProjectFor', () => {
 });
 
 describe('resolveExportFile', () => {
-  it('generates notes.chart as text', () => {
-    const resolved = resolveExportFile(planWith(), 'abc123', 'notes.chart');
-    expect(resolved?.kind).toBe('text');
-    if (resolved?.kind === 'text') expect(resolved.body).toContain('[Song]');
+  it('generates notes.mid as MIDI bytes', () => {
+    const resolved = resolveExportFile(planWith(), 'abc123', 'notes.mid');
+    expect(resolved?.kind).toBe('binary');
+    if (resolved?.kind === 'binary') {
+      expect(String.fromCharCode(...resolved.body.slice(0, 4))).toBe('MThd');
+    }
   });
 
   it('generates song.ini as text', () => {
@@ -81,12 +85,13 @@ describe('resolveExportFile', () => {
   });
 
   it('resolves the audio name to the audio stream', () => {
-    expect(resolveExportFile(planWith(), 'abc123', 'song.ogg')?.kind).toBe('audio');
+    expect(resolveExportFile(planWith(), 'abc123', 'song.wav')?.kind).toBe('audio');
   });
 
   it('rejects a name that is not part of this export', () => {
-    // song.mp3 is a real audio name, but not for a plan that is transcoding.
+    // song.mp3 is a real audio name, but not for a plan that is producing WAV.
     expect(resolveExportFile(planWith(), 'abc123', 'song.mp3')).toBeNull();
+    expect(resolveExportFile(planWith(), 'abc123', 'notes.chart')).toBeNull();
     expect(resolveExportFile(planWith(), 'abc123', 'secrets.txt')).toBeNull();
   });
 
@@ -97,23 +102,21 @@ describe('resolveExportFile', () => {
   });
 
   it('rejects album art when the project has none, even if asked for', () => {
-    const plan = planWith({ files: ['notes.chart', 'song.ogg', 'song.ini', 'album.png'] });
+    const plan = planWith({ files: ['notes.mid', 'song.wav', 'song.ini', 'album.png'] });
     plan.project.album = null;
     expect(resolveExportFile(plan, 'abc123', 'album.png')).toBeNull();
   });
 });
 
 describe('exportAudioContentType', () => {
-  it('is audio/ogg when transcoding', () => {
-    expect(exportAudioContentType(planWith())).toBe('audio/ogg');
+  it('follows the target format', () => {
+    expect(exportAudioContentType(planWith())).toBe('audio/wav');
+    expect(exportAudioContentType(planWith({ audioFormat: 'ogg' }))).toBe('audio/ogg');
   });
 
-  it('follows the original extension when keeping it', () => {
+  it('follows the source extension when ffmpeg cannot convert', () => {
     expect(exportAudioContentType(planWith({ canTranscode: false, audioExt: '.mp3' }))).toBe(
       'audio/mpeg',
     );
-    expect(
-      exportAudioContentType(planWith({ canTranscode: false, audioExt: '.wav' })),
-    ).toBe('audio/wav');
   });
 });

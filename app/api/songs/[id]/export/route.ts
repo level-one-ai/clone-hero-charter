@@ -2,16 +2,17 @@ import archiver from 'archiver';
 import { Readable } from 'node:stream';
 import { NextResponse } from 'next/server';
 import { generateSongIni } from '@/lib/chart/songIni';
-import { writeChart } from '@/lib/chart/writeChart';
+import { writeMidi } from '@/lib/chart/writeMidi';
 import { isValidSongId } from '@/lib/server/paths';
 import {
   attachmentDisposition,
   exportAudioName,
   exportProjectFor,
-  openExportAudio,
   planExport,
+  prepareExportAudio,
   type ExportPlan,
 } from '@/lib/server/exportPlan';
+import type { ExportAudioFormat } from '@/lib/server/audio';
 import fs from 'node:fs';
 import { songFile } from '@/lib/server/paths';
 import path from 'node:path';
@@ -67,8 +68,8 @@ interface Params {
  * POST is kept for compatibility with anything already calling it.
  */
 
-function buildArchive(id: string, plan: ExportPlan): Response {
-  const { folderName, alreadyOgg, audioExt, canTranscode, durationMs, warnings } = plan;
+async function buildArchive(id: string, plan: ExportPlan): Promise<Response> {
+  const { folderName, audioExt, audioFormat, canTranscode, durationMs, warnings } = plan;
   const project = plan.project;
 
   const archive = archiver('zip', {
@@ -77,12 +78,14 @@ function buildArchive(id: string, plan: ExportPlan): Response {
     zlib: { level: 1 },
   });
 
-  // ---- notes.chart --------------------------------------------------------------
-  // Regenerated from the current project rather than reading notes.chart off disk,
-  // so an export can never ship a stale chart. exportProjectFor folds the lead-in
-  // into Offset — see its comment for why that beats moving ticks.
+  // ---- notes.mid ----------------------------------------------------------------
+  // Regenerated from the current project rather than read off disk, so an export can
+  // never ship a stale chart. exportProjectFor folds the lead-in into Offset — see its
+  // comment for why that beats moving ticks.
   const exportProject = exportProjectFor(plan);
-  archive.append(writeChart(exportProject), { name: `${folderName}/notes.chart` });
+  const midi = writeMidi(exportProject);
+  archive.append(Buffer.from(midi.data), { name: `${folderName}/notes.mid` });
+  warnings.push(...midi.warnings);
 
   // ---- song.ini -----------------------------------------------------------------
   archive.append(generateSongIni(exportProject, { durationMs }), {
@@ -90,16 +93,21 @@ function buildArchive(id: string, plan: ExportPlan): Response {
   });
 
   // ---- audio --------------------------------------------------------------------
-  // Piped straight into the archive — a large WAV is never written to disk twice.
-  // On an ffmpeg failure the archive is ABORTED rather than finished: a truncated ogg
-  // would only be discovered when the song cuts out mid-play in game, whereas aborting
-  // breaks the response stream so the download fails visibly.
-  const audio = openExportAudio(plan, (reason) => {
-    console.error(`[export ${id}] ${reason}`);
-    archive.abort();
-  });
-  archive.append(audio, {
-    name: `${folderName}/${exportAudioName(canTranscode, alreadyOgg, audioExt)}`,
+  // Any conversion happens BEFORE the archive starts, so a failure here still returns a
+  // clean 500 rather than a half-written zip. See prepareExportAudio for why WAV in
+  // particular cannot be piped.
+  let audio: { stream: Readable; cleanup: () => Promise<void> };
+  try {
+    audio = await prepareExportAudio(plan, id);
+  } catch (error) {
+    console.error(`[export ${id}] audio preparation failed:`, error);
+    return NextResponse.json(
+      { error: `Could not prepare the audio: ${(error as Error).message}` },
+      { status: 500 },
+    );
+  }
+  archive.append(audio.stream, {
+    name: `${folderName}/${exportAudioName(canTranscode, audioFormat, audioExt)}`,
   });
 
   // ---- album art ----------------------------------------------------------------
@@ -122,6 +130,11 @@ function buildArchive(id: string, plan: ExportPlan): Response {
     console.error(`[export ${id}] archiver error:`, error);
   });
 
+  // The scratch file, if there was one, is only safe to remove once the archive has
+  // finished reading it.
+  archive.on('end', () => void audio.cleanup());
+  archive.on('error', () => void audio.cleanup());
+
   void archive.finalize();
 
   const filename = `${folderName}.zip`;
@@ -141,10 +154,10 @@ export async function GET(request: Request, { params }: Params) {
   if (!isValidSongId(id)) return NextResponse.json({ error: 'Invalid song id' }, { status: 400 });
 
   const url = new URL(request.url);
-  const keepOriginalAudio = url.searchParams.get('keepOriginalAudio') === '1';
+  const audioFormat = parseAudioFormat(url.searchParams.get('audioFormat'));
   const dryRun = url.searchParams.get('dryRun') === '1';
 
-  const plan = await planExport(id, keepOriginalAudio);
+  const plan = await planExport(id, audioFormat);
   if ('error' in plan) {
     return NextResponse.json({ error: plan.error }, { status: plan.status });
   }
@@ -154,7 +167,8 @@ export async function GET(request: Request, { params }: Params) {
       folderName: plan.folderName,
       files: plan.files,
       warnings: plan.warnings,
-      transcoding: plan.canTranscode,
+      transcoding: plan.canTranscode && !plan.copyAudioVerbatim,
+      audioFormat: plan.audioFormat,
       leadingSilenceMs: plan.leadingSilenceMs,
     });
   }
@@ -167,17 +181,22 @@ export async function POST(request: Request, { params }: Params) {
   const { id } = await params;
   if (!isValidSongId(id)) return NextResponse.json({ error: 'Invalid song id' }, { status: 400 });
 
-  let keepOriginalAudio = false;
+  let audioFormat: ExportAudioFormat = 'wav';
   try {
-    const body = (await request.json()) as { keepOriginalAudio?: boolean } | null;
-    keepOriginalAudio = Boolean(body?.keepOriginalAudio);
+    const body = (await request.json()) as { audioFormat?: string } | null;
+    audioFormat = parseAudioFormat(body?.audioFormat ?? null);
   } catch {
     // No body is fine — defaults apply.
   }
 
-  const plan = await planExport(id, keepOriginalAudio);
+  const plan = await planExport(id, audioFormat);
   if ('error' in plan) {
     return NextResponse.json({ error: plan.error }, { status: plan.status });
   }
   return buildArchive(id, plan);
+}
+
+/** WAV unless OGG is asked for explicitly — see the module comment. */
+function parseAudioFormat(value: string | null): ExportAudioFormat {
+  return value === 'ogg' ? 'ogg' : 'wav';
 }

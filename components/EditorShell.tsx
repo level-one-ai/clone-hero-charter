@@ -37,7 +37,7 @@ import {
   starPowerHint,
   type StarPowerToolState,
 } from '@/lib/editor/starPowerTool';
-import { exportSong, saveChart } from '@/lib/client/api';
+import { exportSong, saveChart, type ExportAudioFormat } from '@/lib/client/api';
 
 /**
  * Editor shell: owns chart state, playback wiring, autosave and keyboard shortcuts.
@@ -158,7 +158,7 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
   // ---- export ------------------------------------------------------------------
 
   const handleExport = useCallback(
-    async (keepOriginalAudio: boolean) => {
+    async (audioFormat: ExportAudioFormat) => {
       setExporting(true);
       setMessage(null);
       try {
@@ -167,7 +167,7 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
         if (projectRef.current && dirty) await save();
         // A navigation, not a fetch — the browser streams the zip to disk. Warnings were
         // already shown by the dialog's dry run, so there is nothing left to report.
-        exportSong(projectRef.current.id, keepOriginalAudio);
+        exportSong(projectRef.current.id, audioFormat);
         setExportOpen(false);
         setMessage({ kind: 'info', text: 'Export started — check your downloads.' });
       } catch (error) {
@@ -733,7 +733,7 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
         open={exportOpen}
         exporting={exporting}
         onClose={() => setExportOpen(false)}
-        onExport={(keepOriginalAudio) => void handleExport(keepOriginalAudio)}
+        onExport={(audioFormat) => void handleExport(audioFormat)}
       />
 
       <HelpOverlay open={helpOpen} onClose={() => setHelpOpen(false)} />

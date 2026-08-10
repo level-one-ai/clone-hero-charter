@@ -5,10 +5,11 @@ import { isValidSongId } from '@/lib/server/paths';
 import {
   attachmentDisposition,
   exportAudioContentType,
-  openExportAudio,
   planExport,
+  prepareExportAudio,
   resolveExportFile,
 } from '@/lib/server/exportPlan';
+import type { ExportAudioFormat } from '@/lib/server/audio';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -42,9 +43,10 @@ export async function GET(request: Request, { params }: Params) {
 
   const url = new URL(request.url);
   const name = url.searchParams.get('name') ?? '';
-  const keepOriginalAudio = url.searchParams.get('keepOriginalAudio') === '1';
+  const audioFormat: ExportAudioFormat =
+    url.searchParams.get('audioFormat') === 'ogg' ? 'ogg' : 'wav';
 
-  const plan = await planExport(id, keepOriginalAudio);
+  const plan = await planExport(id, audioFormat);
   if ('error' in plan) {
     return NextResponse.json({ error: plan.error }, { status: plan.status });
   }
@@ -68,6 +70,12 @@ export async function GET(request: Request, { params }: Params) {
     });
   }
 
+  if (resolved.kind === 'binary') {
+    return new Response(resolved.body as BodyInit, {
+      headers: { ...headers, 'Content-Type': resolved.contentType },
+    });
+  }
+
   if (resolved.kind === 'file') {
     const stream = Readable.toWeb(fs.createReadStream(resolved.path)) as ReadableStream;
     return new Response(stream, {
@@ -75,15 +83,21 @@ export async function GET(request: Request, { params }: Params) {
     });
   }
 
-  // Audio may be transcoded or padded on the fly, so it streams. A mid-stream ffmpeg
-  // failure can only break the connection at this point — the browser reports that as a
-  // failed download, which is the honest outcome and better than a truncated file.
-  const audio = openExportAudio(plan, (reason) => {
-    console.error(`[export ${id}] ${reason}`);
-    audio.destroy(new Error(reason));
-  });
+  // Any conversion finishes before the response starts, so a failure is a clean 500
+  // rather than a truncated download.
+  let audio;
+  try {
+    audio = await prepareExportAudio(plan, id);
+  } catch (error) {
+    console.error(`[export ${id}] audio preparation failed:`, error);
+    return NextResponse.json(
+      { error: `Could not prepare the audio: ${(error as Error).message}` },
+      { status: 500 },
+    );
+  }
+  audio.stream.on('close', () => void audio.cleanup());
 
-  return new Response(Readable.toWeb(audio) as ReadableStream, {
+  return new Response(Readable.toWeb(audio.stream) as ReadableStream, {
     headers: { ...headers, 'Content-Type': exportAudioContentType(plan) },
   });
 }

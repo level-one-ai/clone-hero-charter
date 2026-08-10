@@ -3,14 +3,15 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
 import { generateSongIni } from '@/lib/chart/songIni';
-import { writeChart } from '@/lib/chart/writeChart';
 import {
-  canTranscodeToOgg,
+  canTranscodeTo,
   hasFfmpeg,
   probeAudio,
-  spawnOggTranscode,
-  spawnSilencePad,
+  transcodeToFile,
+  type ExportAudioFormat,
 } from '@/lib/server/audio';
+import { TMP_DIR } from '@/lib/server/paths';
+import { writeMidi } from '@/lib/chart/writeMidi';
 import { exportFolderName, songDir, songFile } from '@/lib/server/paths';
 import { readProject } from '@/lib/server/storage';
 import type { Project } from '@/lib/chart/types';
@@ -30,7 +31,10 @@ export interface ExportPlan {
   folderName: string;
   audioPath: string;
   audioExt: string;
-  alreadyOgg: boolean;
+  /** Format the packaged audio will be in. */
+  audioFormat: ExportAudioFormat;
+  /** True when the source file can be copied as-is, with no ffmpeg involved. */
+  copyAudioVerbatim: boolean;
   canTranscode: boolean;
   leadingSilenceMs: number;
   durationMs: number;
@@ -46,7 +50,7 @@ export interface ExportPlanError {
 
 export async function planExport(
   id: string,
-  keepOriginalAudio: boolean,
+  audioFormat: ExportAudioFormat = 'wav',
 ): Promise<ExportPlan | ExportPlanError> {
   const project = await readProject(id);
   if (!project) return { error: 'Song not found', status: 404 };
@@ -70,34 +74,32 @@ export async function planExport(
 
   const folderName = exportFolderName(project.meta);
   const audioExt = path.extname(project.audio.file).toLowerCase();
-  const alreadyOgg = audioExt === '.ogg';
-  const wantTranscode = !keepOriginalAudio && !alreadyOgg;
-  // Verified BEFORE the response starts streaming — see canTranscodeToOgg. Once the
-  // zip is streaming we can no longer change the status code, so a failure detected
-  // later can only produce a corrupt download.
-  const canTranscode = wantTranscode ? await canTranscodeToOgg(audioPath) : false;
-
   const warnings: string[] = [];
-  if (wantTranscode && !canTranscode) {
+
+  /**
+   * The audio can be copied byte-for-byte only when it is already the target format AND
+   * nothing has to be done to it. Any lead-in means re-encoding, since the silence has to
+   * be baked into the file.
+   */
+  const copyAudioVerbatim = audioExt === `.${audioFormat}` && leadingSilenceMs === 0;
+  // Verified BEFORE the response starts streaming. Once the zip is on the wire the status
+  // code is fixed, so a failure discovered later can only produce a corrupt download.
+  const canTranscode = copyAudioVerbatim ? true : await canTranscodeTo(audioPath, audioFormat);
+
+  if (!copyAudioVerbatim && !canTranscode) {
     warnings.push(
       (await hasFfmpeg())
-        ? 'ffmpeg could not convert this audio to OGG, so the original file will be packaged instead. Clone Hero will still load it.'
-        : 'ffmpeg is not available, so the original audio will be packaged without transcoding.',
+        ? `ffmpeg could not convert this audio to ${audioFormat.toUpperCase()}, so the original ${audioExt.replace('.', '').toUpperCase()} will be packaged instead. Clone Hero still loads it.`
+        : `ffmpeg is not available, so the original ${audioExt.replace('.', '').toUpperCase()} will be packaged without converting.`,
     );
+    if (leadingSilenceMs > 0) {
+      warnings.push(
+        'The lead-in silence also needs ffmpeg, so it cannot be added. The chart will be out of sync by that amount.',
+      );
+    }
   }
 
-  const padOriginal = !canTranscode && leadingSilenceMs > 0 && (await hasFfmpeg());
-  if (leadingSilenceMs > 0 && !canTranscode && !padOriginal) {
-    warnings.push(
-      'ffmpeg is not available, so the lead-in silence cannot be added to the audio. The chart would be out of sync by that amount.',
-    );
-  }
-
-  const files = ['notes.chart', exportAudioName(
-    canTranscode,
-    alreadyOgg,
-    audioExt,
-  ), 'song.ini'];
+  const files = ['notes.mid', exportAudioName(canTranscode, audioFormat, audioExt), 'song.ini'];
 
   if (project.album) {
     try {
@@ -114,7 +116,8 @@ export async function planExport(
     folderName,
     audioPath,
     audioExt,
-    alreadyOgg,
+    audioFormat,
+    copyAudioVerbatim,
     canTranscode,
     leadingSilenceMs,
     durationMs,
@@ -123,13 +126,19 @@ export async function planExport(
   };
 }
 
-/** The audio filename inside the folder, given the transcode decision. */
+/**
+ * The audio filename inside the folder.
+ *
+ * Falls back to the source extension only when ffmpeg cannot produce the target format —
+ * shipping the original is better than shipping nothing, and Clone Hero loads .wav, .ogg,
+ * .mp3 and .opus alike.
+ */
 export function exportAudioName(
   canTranscode: boolean,
-  alreadyOgg: boolean,
+  audioFormat: ExportAudioFormat,
   audioExt: string,
 ): string {
-  return canTranscode ? 'song.ogg' : `song${alreadyOgg ? '.ogg' : audioExt}`;
+  return canTranscode ? `song.${audioFormat}` : `song${audioExt}`;
 }
 
 /**
@@ -152,57 +161,50 @@ export function exportProjectFor(plan: ExportPlan): Project {
 }
 
 /**
- * Open the export's audio as a stream, applying the same transcode / pad / copy decision
- * the archive uses.
+ * Prepare the export's audio and return a stream of it, plus a cleanup to call when the
+ * stream has been consumed.
  *
- * `onFailure` fires when ffmpeg dies mid-stream. The zip must abort on that — a
- * truncated OGG would only be discovered when the song cuts out in game — while a
- * single-file download can only break the connection, which the browser reports as a
- * failed download. Either way the caller decides, because only it knows what it can
- * still do about it.
+ * Anything that needs ffmpeg is written to a TEMP FILE first rather than piped. WAV is
+ * why: its RIFF header states the size of the data that follows, and ffmpeg cannot know
+ * that while writing to a pipe — it emits a placeholder and hopes the reader copes. A
+ * seekable file lets it go back and correct the header, so what ships is an ordinary WAV
+ * rather than one that merely usually works.
+ *
+ * When the source is already the target format and there is no lead-in, nothing is
+ * re-encoded at all: the file is streamed straight from disk.
  */
-export function openExportAudio(
+export async function prepareExportAudio(
   plan: ExportPlan,
-  onFailure: (reason: string) => void,
-): Readable {
-  const { audioPath, audioExt, canTranscode, leadingSilenceMs } = plan;
+  id: string,
+): Promise<{ stream: Readable; cleanup: () => Promise<void> }> {
+  const noop = async () => {};
 
-  if (canTranscode) {
-    const ffmpeg = spawnOggTranscode(audioPath, leadingSilenceMs);
-    let stderr = '';
-    ffmpeg.stderr.on('data', (chunk) => {
-      stderr += String(chunk).slice(0, 2000);
-    });
-    ffmpeg.on('close', (code) => {
-      if (code !== 0) onFailure(`ffmpeg failed (${code}): ${stderr}`);
-    });
-    ffmpeg.on('error', (error) => onFailure(`could not run ffmpeg: ${error}`));
-    return ffmpeg.stdout;
+  if (plan.copyAudioVerbatim || !plan.canTranscode) {
+    // Either it is already what we want, or ffmpeg cannot help and planExport has
+    // already warned that the original is going out as-is.
+    return { stream: fs.createReadStream(plan.audioPath), cleanup: noop };
   }
 
-  if (leadingSilenceMs > 0) {
-    // Keeping the original format, but the lead-in still has to be baked in or the
-    // chart would be out of sync with the audio by exactly that much. planExport has
-    // already warned when ffmpeg is missing, in which case this falls through to the
-    // plain copy below.
-    const format = audioExt.replace('.', '') || 'wav';
-    const padder = spawnSilencePad(audioPath, leadingSilenceMs, format);
-    let spawned = false;
-    padder.on('spawn', () => {
-      spawned = true;
-    });
-    padder.on('error', (error) => {
-      if (spawned) onFailure(`could not pad the audio: ${error}`);
-    });
-    return padder.stdout;
-  }
+  await fsp.mkdir(TMP_DIR, { recursive: true });
+  const scratch = path.join(TMP_DIR, `export-${id}-${Date.now()}.${plan.audioFormat}`);
+  await transcodeToFile(plan.audioPath, scratch, plan.audioFormat, plan.leadingSilenceMs);
 
-  return fs.createReadStream(audioPath);
+  return {
+    stream: fs.createReadStream(scratch),
+    cleanup: async () => {
+      try {
+        await fsp.unlink(scratch);
+      } catch {
+        // Already gone, or the directory was swept — either way there is nothing to do.
+      }
+    },
+  };
 }
 
 /** What a single requested filename resolves to. */
 export type ExportFile =
   | { kind: 'text'; body: string; contentType: string }
+  | { kind: 'binary'; body: Uint8Array; contentType: string }
   | { kind: 'audio' }
   | { kind: 'file'; path: string; contentType: string };
 
@@ -220,13 +222,11 @@ export function resolveExportFile(
 ): ExportFile | null {
   if (!plan.files.includes(name)) return null;
 
-  if (name === 'notes.chart') {
+  if (name === 'notes.mid') {
     return {
-      kind: 'text',
-      body: writeChart(exportProjectFor(plan)),
-      // text/plain rather than a made-up type: browsers handle it predictably, and
-      // Content-Disposition is what actually names the file.
-      contentType: 'text/plain; charset=utf-8',
+      kind: 'binary',
+      body: writeMidi(exportProjectFor(plan)).data,
+      contentType: 'audio/midi',
     };
   }
 
@@ -253,7 +253,7 @@ export function resolveExportFile(
 
 /** Content type for the export's audio, matching whatever openExportAudio produces. */
 export function exportAudioContentType(plan: ExportPlan): string {
-  const ext = plan.canTranscode ? '.ogg' : plan.alreadyOgg ? '.ogg' : plan.audioExt;
+  const ext = plan.canTranscode ? `.${plan.audioFormat}` : plan.audioExt;
   return AUDIO_MIME[ext] ?? 'application/octet-stream';
 }
 

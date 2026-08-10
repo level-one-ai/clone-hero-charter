@@ -3,16 +3,22 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Project } from '@/lib/chart/types';
 import { exportFolderName } from '@/lib/chart/naming';
-import { exportFileUrl, exportPreflight, type ExportPreflight } from '@/lib/client/api';
+import {
+  exportFileUrl,
+  exportPreflight,
+  type ExportAudioFormat,
+  type ExportPreflight,
+} from '@/lib/client/api';
 import { countBySeverity, summariseIssues, validateChart } from '@/lib/chart/validateChart';
 
 /**
  * Export dialog.
  *
- * Shows exactly what folder will be produced before anything is downloaded, and
- * exposes the one real choice: OGG (small, the default) or the original audio
- * untouched. Clone Hero loads both, so this is purely a size-versus-fidelity call and
- * belongs with the user rather than buried in a config file.
+ * Shows exactly what folder will be produced before anything is downloaded, and exposes
+ * the one real choice: WAV (the default, and what a Clone Hero song folder normally
+ * contains) or OGG (about ten times smaller, identical in game). Both load, so this is a
+ * size-versus-convention call and belongs with the user rather than buried in a config
+ * file.
  *
  * The preview is not guessed from the project — it comes from the server's dry run, so
  * what you see listed is what the archive will actually contain, including the cases
@@ -25,7 +31,7 @@ interface Props {
   open: boolean;
   exporting: boolean;
   onClose: () => void;
-  onExport: (keepOriginalAudio: boolean) => void;
+  onExport: (audioFormat: ExportAudioFormat) => void;
 }
 
 export default function ExportDialog({
@@ -36,7 +42,12 @@ export default function ExportDialog({
   onClose,
   onExport,
 }: Props) {
-  const [keepOriginal, setKeepOriginal] = useState(false);
+  /**
+   * WAV by default, because that is what a Clone Hero song folder normally contains and
+   * what the game loads with no decoding cost at all. OGG stays available for anyone who
+   * cares more about the download size than about matching the convention.
+   */
+  const [audioFormat, setAudioFormat] = useState<ExportAudioFormat>('wav');
   const [plan, setPlan] = useState<ExportPreflight | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
   const [loadingPlan, setLoadingPlan] = useState(false);
@@ -58,8 +69,6 @@ export default function ExportDialog({
   const issueCounts = countBySeverity(chartIssues);
 
   const sourceExt = project.audio.file.slice(project.audio.file.lastIndexOf('.')).toLowerCase();
-  const alreadyOgg = sourceExt === '.ogg';
-  const effectiveKeepOriginal = keepOriginal || alreadyOgg;
 
   useEffect(() => {
     if (!open) return;
@@ -77,7 +86,7 @@ export default function ExportDialog({
     let cancelled = false;
     setLoadingPlan(true);
     setPlanError(null);
-    exportPreflight(songId, effectiveKeepOriginal)
+    exportPreflight(songId, audioFormat)
       .then((result) => {
         if (!cancelled) setPlan(result);
       })
@@ -93,15 +102,14 @@ export default function ExportDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, songId, effectiveKeepOriginal]);
+  }, [open, songId, audioFormat]);
 
   if (!open) return null;
 
   const folderName = plan?.folderName ?? exportFolderName(project.meta);
-  const fallbackAudioName = effectiveKeepOriginal ? `song${sourceExt}` : 'song.ogg';
   const files = plan?.files ?? [
-    'notes.chart',
-    fallbackAudioName,
+    'notes.mid',
+    `song.${audioFormat}`,
     'song.ini',
     ...(project.album ? [project.album.toLowerCase().endsWith('.png') ? 'album.png' : 'album.jpg'] : []),
   ];
@@ -142,7 +150,7 @@ export default function ExportDialog({
                       leaves the dialog exactly where it is.
                     */}
                     <a
-                      href={exportFileUrl(songId, file, effectiveKeepOriginal)}
+                      href={exportFileUrl(songId, file, audioFormat)}
                       className="shrink-0 font-sans text-faint underline-offset-2 hover:text-fg hover:underline"
                     >
                       download
@@ -214,23 +222,32 @@ export default function ExportDialog({
             </ul>
           )}
 
-          <label className="flex cursor-pointer items-start gap-3">
-            <input
-              type="checkbox"
-              checked={effectiveKeepOriginal}
-              disabled={alreadyOgg}
-              onChange={(event) => setKeepOriginal(event.target.checked)}
-              className="mt-0.5 accent-white"
-            />
-            <span className="text-xs">
-              <span className="text-fg">Keep the original audio</span>
-              <span className="mt-0.5 block text-2xs text-faint">
-                {alreadyOgg
-                  ? 'Your audio is already OGG, so nothing is converted either way.'
-                  : `Packages your ${sourceExt.replace('.', '').toUpperCase()} untouched instead of converting to OGG. Identical in game, but roughly ten times larger to download.`}
-              </span>
-            </span>
-          </label>
+          <div>
+            <p className="ch-label">Audio format</p>
+            <div className="flex">
+              {(['wav', 'ogg'] as const).map((format) => (
+                <button
+                  key={format}
+                  type="button"
+                  onClick={() => setAudioFormat(format)}
+                  className={`border px-3 py-1.5 text-2xs uppercase tracking-widest ${
+                    audioFormat === format
+                      ? 'border-fg bg-fg text-bg'
+                      : 'border-edge2 bg-panel text-muted hover:text-fg'
+                  }`}
+                >
+                  {format}
+                </button>
+              ))}
+            </div>
+            <p className="mt-1 text-2xs text-faint">
+              {audioFormat === 'wav'
+                ? `WAV is what a Clone Hero song folder normally contains${
+                    sourceExt === '.wav' ? ' — and your audio is already WAV, so it is copied untouched.' : '.'
+                  }`
+                : 'OGG is roughly ten times smaller and identical in game, but not what most song folders use.'}
+            </p>
+          </div>
         </div>
 
         <footer className="flex justify-end gap-2 border-t border-edge px-4 py-3">
@@ -240,7 +257,7 @@ export default function ExportDialog({
           <button
             type="button"
             className="ch-button ch-button-primary min-w-[104px]"
-            onClick={() => onExport(effectiveKeepOriginal)}
+            onClick={() => onExport(audioFormat)}
             disabled={exporting || Boolean(planError)}
           >
             {exporting ? 'Packing…' : 'Export'}

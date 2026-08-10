@@ -15,11 +15,14 @@ library convention — that drops straight into Clone Hero's `Songs/` directory:
 
 ```
 ERRA - Gore of Being (enerbewow)/
-  notes.chart     the chart
-  song.ogg        the audio (transcoded from your upload)
+  notes.mid       the chart
+  song.wav        the audio
   album.jpg       cover art, if you supplied one (.png also works)
   song.ini        metadata — this, not the chart, is what the song browser reads
 ```
+
+That is the whole folder: four files, nothing else. `notes.mid` and `song.wav` are what
+Clone Hero song folders normally contain, which is why they are the defaults here.
 
 The charter's name identifies whose chart it is when several people have charted the
 same song. Set it on the New Song screen or in the editor's **Song** panel, which
@@ -50,13 +53,30 @@ always imported in musical mode — the pitches are mapped to frets by contour. 
 still chosen by name where possible, so a file with "Guitar 1" and "Drums" charts the
 guitar even though the drums have more notes.
 
-**Audio format.** Exports transcode to OGG Vorbis by default — the community standard,
-and roughly ten times smaller than a lossless WAV. Clone Hero also loads `.wav`, `.mp3`
-and `.opus`, so the export dialog has a **Keep the original audio** toggle when you'd
-rather ship `song.wav` untouched. If ffmpeg is unavailable or cannot read your file,
-the export falls back to the original audio and tells you it did — before the download
-starts, not after: opening the export dialog asks the server what the archive would
-contain (`GET /api/songs/<id>/export?dryRun=1`) and shows the real file list and warnings.
+**The chart is written as MIDI.** Clone Hero loads both `.chart` and `.mid`, but `.mid`
+is what almost every song folder in the wild contains and what Moonscraper, EOF and the
+Rock Band lineage expect. `lib/chart/writeMidi.ts` writes the standard Guitar Hero layout —
+Expert 96 / Hard 84 / Medium 72 / Easy 60, `+5` forced HOPO, `+7` open note, note 116 star
+power, note 104 taps — and is the exact mirror of the importer, so a chart exported and
+re-imported comes back identical.
+
+One thing MIDI cannot express as precisely as the editor: star power and tap markers are
+per *song* in a `.mid`, not per difficulty. Expert's are used, and if a lower difficulty
+disagrees the export says so rather than dropping the difference silently.
+
+**Audio format.** Exports are WAV by default, matching the convention above. WAV is
+written to a temporary file rather than piped, because a RIFF header states the size of
+the data that follows and ffmpeg cannot know that while writing to a pipe — a seekable
+file lets it correct the header, so what ships is an ordinary WAV rather than one that
+merely usually works. If your upload is already a WAV and there is no lead-in, it is
+copied byte-for-byte with no re-encoding at all.
+
+The dialog also offers **OGG**, roughly ten times smaller and identical in game, for when
+download size matters more than matching the convention. If ffmpeg is unavailable or
+cannot read your file, the export falls back to the original audio and tells you — before
+the download starts, not after: opening the export dialog asks the server what the archive
+would contain (`GET /api/songs/<id>/export?dryRun=1`) and shows the real file list and
+warnings.
 
 The download itself is a plain navigation to `GET /api/songs/<id>/export`, so the browser
 streams the zip straight to disk instead of the tab buffering the whole archive in memory.
@@ -86,7 +106,7 @@ been inside the archive — the chart carries the same lead-in offset, and the a
 same transcode. Two reasons this exists:
 
 - A Clone Hero song *is* a folder of these files; the zip is only a wrapper. Pulling a
-  tweaked `notes.chart` on its own beats re-downloading forty megabytes of audio with it.
+  tweaked `notes.mid` on its own beats re-downloading the audio with it.
 - Chrome's insecure-download block targets archives and executables, not text and audio.
   On a plain-HTTP deployment the dialog says so and points at these links, so an instance
   without a certificate is never a dead end. Fixing HTTPS is still the right answer, and
@@ -224,14 +244,16 @@ $DATA_DIR/
       audio.wav         your uploaded audio (extension preserved)
       album.png         cover art, if uploaded
       source.mid        the original reference file, kept for re-import
-      notes.chart       GENERATED from project.json on every save
+      notes.chart       GENERATED from project.json on every save (working copy)
   tmp/                  upload staging and export scratch, swept automatically
 ```
 
 `project.json` is the source of truth, not `notes.chart`. Round-tripping `.chart`
 through an editor is lossy: note flags are stored as separate lines sharing a tick, and
 notes carry no stable identity for selection and drag state. So the editor reads and
-writes JSON, and `notes.chart` is regenerated on every save — it can never drift.
+writes JSON, and `notes.chart` is regenerated on every save — it can never drift. That
+copy is a readable working artifact for inspecting a project on the server; the export
+writes `notes.mid` from the same state, so the two never disagree.
 
 Nothing stops you editing `project.json` by hand; the app validates and normalises it
 on the next save.

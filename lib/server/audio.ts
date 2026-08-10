@@ -132,7 +132,27 @@ export async function hasFfmpeg(): Promise<boolean> {
  * `hasFfmpeg` alone is not enough: a stripped ffmpeg build can exist on PATH and
  * still lack the WAV demuxer or the libvorbis encoder.
  */
-export async function canTranscodeToOgg(inputPath: string): Promise<boolean> {
+/** Audio formats the export can produce. */
+export type ExportAudioFormat = 'wav' | 'ogg';
+
+const CODEC: Record<ExportAudioFormat, string[]> = {
+  // 16-bit PCM at 44.1kHz: what Clone Hero song folders ship, and what every decoder
+  // handles without question.
+  wav: ['-c:a', 'pcm_s16le', '-ar', '44100'],
+  ogg: ['-c:a', 'libvorbis', '-q:a', '5'],
+};
+
+/**
+ * Can ffmpeg actually read this file and write the target format?
+ *
+ * Checked BEFORE the export response starts streaming. Once bytes are on the wire the
+ * status code is fixed, so a failure discovered later can only produce a corrupt
+ * download.
+ */
+export async function canTranscodeTo(
+  inputPath: string,
+  format: ExportAudioFormat,
+): Promise<boolean> {
   try {
     await run('ffmpeg', [
       '-hide_banner',
@@ -143,10 +163,9 @@ export async function canTranscodeToOgg(inputPath: string): Promise<boolean> {
       '-vn',
       '-t',
       '0.1',
-      '-c:a',
-      'libvorbis',
+      ...CODEC[format],
       '-f',
-      'ogg',
+      format,
       '-y',
       process.platform === 'win32' ? 'NUL' : '/dev/null',
     ]);
@@ -167,9 +186,16 @@ export async function canTranscodeToOgg(inputPath: string): Promise<boolean> {
  * -q:a 5 is ~160kbps VBR, the quality level the Clone Hero community uses for customs.
  */
 export function spawnOggTranscode(inputPath: string, leadingSilenceMs = 0) {
-  return spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', ...transcodeArgs(inputPath, leadingSilenceMs)], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  return spawn(
+    'ffmpeg',
+    [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      ...transcodeArgs(inputPath, leadingSilenceMs, 'ogg', 'pipe:1'),
+    ],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  );
 }
 
 /**
@@ -180,13 +206,43 @@ export function spawnOggTranscode(inputPath: string, leadingSilenceMs = 0) {
  * between the two. `all=1` applies the delay to every channel — without it only the
  * first channel is delayed and the result is audibly out of phase.
  */
-function transcodeArgs(inputPath: string, leadingSilenceMs: number): string[] {
-  const args = ['-i', inputPath, '-vn']; // -vn drops embedded art, which would break the ogg
+function transcodeArgs(
+  inputPath: string,
+  leadingSilenceMs: number,
+  format: ExportAudioFormat,
+  destination: string,
+): string[] {
+  const args = ['-i', inputPath, '-vn']; // -vn drops embedded art, which would break the file
   if (leadingSilenceMs > 0) {
     args.push('-af', `adelay=${Math.round(leadingSilenceMs)}:all=1`);
   }
-  args.push('-c:a', 'libvorbis', '-q:a', '5', '-f', 'ogg', 'pipe:1');
+  args.push(...CODEC[format], '-f', format);
+  if (destination !== 'pipe:1') args.push('-y');
+  args.push(destination);
   return args;
+}
+
+/**
+ * Transcode to a FILE rather than a pipe.
+ *
+ * WAV is the reason this exists. A RIFF header states the size of the data that follows,
+ * and ffmpeg cannot know that when writing to a pipe — it emits a placeholder size and
+ * relies on the reader to cope. Plenty of players do; a game loading the file at startup
+ * is not something to gamble on. Writing to a seekable file lets ffmpeg go back and fix
+ * the header, so what ships is a completely ordinary WAV.
+ */
+export async function transcodeToFile(
+  inputPath: string,
+  outputPath: string,
+  format: ExportAudioFormat,
+  leadingSilenceMs = 0,
+): Promise<void> {
+  await run('ffmpeg', [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    ...transcodeArgs(inputPath, leadingSilenceMs, format, outputPath),
+  ]);
 }
 
 /**

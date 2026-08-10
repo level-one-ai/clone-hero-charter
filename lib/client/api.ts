@@ -150,17 +150,20 @@ export async function uploadAlbumArt(id: string, file: File): Promise<string> {
   return body.album;
 }
 
+export type ExportAudioFormat = 'wav' | 'ogg';
+
 export interface ExportPreflight {
   folderName: string;
   files: string[];
   warnings: string[];
-  /** False when ffmpeg is missing or cannot read this audio, so no OGG conversion happens. */
+  /** False when the audio is copied as-is, or when ffmpeg cannot convert it. */
   transcoding: boolean;
+  audioFormat: ExportAudioFormat;
   leadingSilenceMs: number;
 }
 
-function exportUrl(id: string, keepOriginalAudio: boolean, extra = ''): string {
-  return `/api/songs/${id}/export?keepOriginalAudio=${keepOriginalAudio ? '1' : '0'}${extra}`;
+function exportUrl(id: string, audioFormat: ExportAudioFormat, extra = ''): string {
+  return `/api/songs/${id}/export?audioFormat=${audioFormat}${extra}`;
 }
 
 /**
@@ -173,10 +176,10 @@ function exportUrl(id: string, keepOriginalAudio: boolean, extra = ''): string {
  */
 export async function exportPreflight(
   id: string,
-  keepOriginalAudio: boolean,
+  audioFormat: ExportAudioFormat,
 ): Promise<ExportPreflight> {
   return unwrap<ExportPreflight>(
-    await fetch(exportUrl(id, keepOriginalAudio, '&dryRun=1'), { cache: 'no-store' }),
+    await fetch(exportUrl(id, audioFormat, '&dryRun=1'), { cache: 'no-store' }),
   );
 }
 
@@ -186,22 +189,20 @@ export async function exportPreflight(
  * Used by the dialog's per-file links, which matter when the app is served over plain
  * HTTP: Chrome blocks `.zip` from an insecure origin, but the individual chart, ini and
  * audio files are ordinary text and media. It is also simply the quicker way to re-pull
- * a tweaked notes.chart without the audio attached.
+ * a tweaked notes.mid without the audio attached.
  */
-export function exportFileUrl(id: string, name: string, keepOriginalAudio: boolean): string {
-  return `/api/songs/${id}/export/file?name=${encodeURIComponent(name)}&keepOriginalAudio=${
-    keepOriginalAudio ? '1' : '0'
-  }`;
+export function exportFileUrl(id: string, name: string, audioFormat: ExportAudioFormat): string {
+  return `/api/songs/${id}/export/file?name=${encodeURIComponent(name)}&audioFormat=${audioFormat}`;
 }
 
 /**
  * Start the download.
  *
  * A plain navigation rather than fetch-to-Blob: the browser streams the zip straight to
- * disk instead of the tab holding the whole archive — tens of megabytes for a
- * keep-original-audio export — in memory first. `Content-Disposition` on the response
+ * disk instead of the tab holding the whole archive — tens of megabytes for a WAV
+ * export — in memory first. `Content-Disposition` on the response
  * supplies the filename and keeps the current page in place.
  */
-export function exportSong(id: string, keepOriginalAudio: boolean): void {
-  window.location.href = exportUrl(id, keepOriginalAudio);
+export function exportSong(id: string, audioFormat: ExportAudioFormat): void {
+  window.location.href = exportUrl(id, audioFormat);
 }
