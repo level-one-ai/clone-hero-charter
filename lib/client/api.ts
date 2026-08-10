@@ -151,6 +151,7 @@ export async function uploadAlbumArt(id: string, file: File): Promise<string> {
 }
 
 export type ExportAudioFormat = 'wav' | 'ogg';
+export type ChartFormat = 'chart' | 'mid';
 
 export interface ExportPreflight {
   folderName: string;
@@ -159,11 +160,17 @@ export interface ExportPreflight {
   /** False when the audio is copied as-is, or when ffmpeg cannot convert it. */
   transcoding: boolean;
   audioFormat: ExportAudioFormat;
+  chartFormat: ChartFormat;
   leadingSilenceMs: number;
 }
 
-function exportUrl(id: string, audioFormat: ExportAudioFormat, extra = ''): string {
-  return `/api/songs/${id}/export?audioFormat=${audioFormat}${extra}`;
+export interface ExportOptions {
+  audioFormat: ExportAudioFormat;
+  chartFormat: ChartFormat;
+}
+
+function exportUrl(id: string, options: ExportOptions, extra = ''): string {
+  return `/api/songs/${id}/export?audioFormat=${options.audioFormat}&chartFormat=${options.chartFormat}${extra}`;
 }
 
 /**
@@ -176,10 +183,10 @@ function exportUrl(id: string, audioFormat: ExportAudioFormat, extra = ''): stri
  */
 export async function exportPreflight(
   id: string,
-  audioFormat: ExportAudioFormat,
+  options: ExportOptions,
 ): Promise<ExportPreflight> {
   return unwrap<ExportPreflight>(
-    await fetch(exportUrl(id, audioFormat, '&dryRun=1'), { cache: 'no-store' }),
+    await fetch(exportUrl(id, options, '&dryRun=1'), { cache: 'no-store' }),
   );
 }
 
@@ -189,10 +196,10 @@ export async function exportPreflight(
  * Used by the dialog's per-file links, which matter when the app is served over plain
  * HTTP: Chrome blocks `.zip` from an insecure origin, but the individual chart, ini and
  * audio files are ordinary text and media. It is also simply the quicker way to re-pull
- * a tweaked notes.mid without the audio attached.
+ * a tweaked notes.chart without the audio attached.
  */
-export function exportFileUrl(id: string, name: string, audioFormat: ExportAudioFormat): string {
-  return `/api/songs/${id}/export/file?name=${encodeURIComponent(name)}&audioFormat=${audioFormat}`;
+export function exportFileUrl(id: string, name: string, options: ExportOptions): string {
+  return `/api/songs/${id}/export/file?name=${encodeURIComponent(name)}&audioFormat=${options.audioFormat}&chartFormat=${options.chartFormat}`;
 }
 
 /**
@@ -203,6 +210,6 @@ export function exportFileUrl(id: string, name: string, audioFormat: ExportAudio
  * export — in memory first. `Content-Disposition` on the response
  * supplies the filename and keeps the current page in place.
  */
-export function exportSong(id: string, audioFormat: ExportAudioFormat): void {
-  window.location.href = exportUrl(id, audioFormat);
+export function exportSong(id: string, options: ExportOptions): void {
+  window.location.href = exportUrl(id, options);
 }

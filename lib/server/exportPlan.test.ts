@@ -16,6 +16,7 @@ function planWith(overrides: Partial<ExportPlan> = {}): ExportPlan {
   return {
     project,
     folderName: 'Volumes - Bad Habit (MilfMilker)',
+    chartFormat: 'chart',
     audioPath: '/data/songs/abc123/audio.mp3',
     audioExt: '.mp3',
     audioFormat: 'wav',
@@ -24,7 +25,7 @@ function planWith(overrides: Partial<ExportPlan> = {}): ExportPlan {
     leadingSilenceMs: 0,
     durationMs: 200_000,
     warnings: [],
-    files: ['notes.mid', 'song.wav', 'song.ini'],
+    files: ['notes.chart', 'song.wav', 'song.ini'],
     ...overrides,
   };
 }
@@ -70,8 +71,22 @@ describe('exportProjectFor', () => {
 });
 
 describe('resolveExportFile', () => {
-  it('generates notes.mid as MIDI bytes', () => {
-    const resolved = resolveExportFile(planWith(), 'abc123', 'notes.mid');
+  it('generates notes.chart as text, naming the audio it ships', () => {
+    const resolved = resolveExportFile(planWith(), 'abc123', 'notes.chart');
+    expect(resolved?.kind).toBe('text');
+    if (resolved?.kind === 'text') {
+      expect(resolved.body).toContain('[Song]');
+      // MusicStream used to be hardcoded to song.ogg even when a WAV was shipped.
+      expect(resolved.body).toContain('MusicStream = "song.wav"');
+    }
+  });
+
+  it('generates notes.mid as MIDI bytes when that format was chosen', () => {
+    const plan = planWith({
+      chartFormat: 'mid',
+      files: ['notes.mid', 'song.wav', 'song.ini'],
+    });
+    const resolved = resolveExportFile(plan, 'abc123', 'notes.mid');
     expect(resolved?.kind).toBe('binary');
     if (resolved?.kind === 'binary') {
       expect(String.fromCharCode(...resolved.body.slice(0, 4))).toBe('MThd');
@@ -91,7 +106,7 @@ describe('resolveExportFile', () => {
   it('rejects a name that is not part of this export', () => {
     // song.mp3 is a real audio name, but not for a plan that is producing WAV.
     expect(resolveExportFile(planWith(), 'abc123', 'song.mp3')).toBeNull();
-    expect(resolveExportFile(planWith(), 'abc123', 'notes.chart')).toBeNull();
+    expect(resolveExportFile(planWith(), 'abc123', 'notes.mid')).toBeNull();
     expect(resolveExportFile(planWith(), 'abc123', 'secrets.txt')).toBeNull();
   });
 
@@ -102,7 +117,7 @@ describe('resolveExportFile', () => {
   });
 
   it('rejects album art when the project has none, even if asked for', () => {
-    const plan = planWith({ files: ['notes.mid', 'song.wav', 'song.ini', 'album.png'] });
+    const plan = planWith({ files: ['notes.chart', 'song.wav', 'song.ini', 'album.png'] });
     plan.project.album = null;
     expect(resolveExportFile(plan, 'abc123', 'album.png')).toBeNull();
   });

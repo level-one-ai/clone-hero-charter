@@ -10,6 +10,7 @@ import {
   resolveExportFile,
 } from '@/lib/server/exportPlan';
 import type { ExportAudioFormat } from '@/lib/server/audio';
+import type { ChartFormat } from '@/lib/server/exportPlan';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -31,8 +32,8 @@ interface Params {
  *
  * It is not only a workaround. A Clone Hero song IS a folder of these files — the zip is
  * a convenience wrapper — so fetching them individually is a legitimate way to use the
- * export, and it means re-pulling a tweaked notes.chart without re-downloading forty
- * megabytes of audio alongside it.
+ * export, and it means re-pulling a tweaked notes.chart without re-downloading the
+ * audio alongside it.
  *
  * Every file comes from the same `planExport` the zip uses, so a file fetched here is
  * identical to the one inside the archive, lead-in offset and all.
@@ -45,8 +46,9 @@ export async function GET(request: Request, { params }: Params) {
   const name = url.searchParams.get('name') ?? '';
   const audioFormat: ExportAudioFormat =
     url.searchParams.get('audioFormat') === 'ogg' ? 'ogg' : 'wav';
+  const chartFormat: ChartFormat = url.searchParams.get('chartFormat') === 'mid' ? 'mid' : 'chart';
 
-  const plan = await planExport(id, audioFormat);
+  const plan = await planExport(id, audioFormat, chartFormat);
   if ('error' in plan) {
     return NextResponse.json({ error: plan.error }, { status: plan.status });
   }

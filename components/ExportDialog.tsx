@@ -6,7 +6,9 @@ import { exportFolderName } from '@/lib/chart/naming';
 import {
   exportFileUrl,
   exportPreflight,
+  type ChartFormat,
   type ExportAudioFormat,
+  type ExportOptions,
   type ExportPreflight,
 } from '@/lib/client/api';
 import { countBySeverity, summariseIssues, validateChart } from '@/lib/chart/validateChart';
@@ -31,7 +33,7 @@ interface Props {
   open: boolean;
   exporting: boolean;
   onClose: () => void;
-  onExport: (audioFormat: ExportAudioFormat) => void;
+  onExport: (options: ExportOptions) => void;
 }
 
 export default function ExportDialog({
@@ -48,6 +50,13 @@ export default function ExportDialog({
    * cares more about the download size than about matching the convention.
    */
   const [audioFormat, setAudioFormat] = useState<ExportAudioFormat>('wav');
+  /**
+   * `.chart` by default. It is what Clone Hero song folders overwhelmingly contain and
+   * what the game's parser is most reliable with — if a chart will not load in game,
+   * this is the format to be on. `.mid` is here for tools that prefer it.
+   */
+  const [chartFormat, setChartFormat] = useState<ChartFormat>('chart');
+  const options: ExportOptions = { audioFormat, chartFormat };
   const [plan, setPlan] = useState<ExportPreflight | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
   const [loadingPlan, setLoadingPlan] = useState(false);
@@ -86,7 +95,7 @@ export default function ExportDialog({
     let cancelled = false;
     setLoadingPlan(true);
     setPlanError(null);
-    exportPreflight(songId, audioFormat)
+    exportPreflight(songId, { audioFormat, chartFormat })
       .then((result) => {
         if (!cancelled) setPlan(result);
       })
@@ -102,13 +111,13 @@ export default function ExportDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, songId, audioFormat]);
+  }, [open, songId, audioFormat, chartFormat]);
 
   if (!open) return null;
 
   const folderName = plan?.folderName ?? exportFolderName(project.meta);
   const files = plan?.files ?? [
-    'notes.mid',
+    `notes.${chartFormat}`,
     `song.${audioFormat}`,
     'song.ini',
     ...(project.album ? [project.album.toLowerCase().endsWith('.png') ? 'album.png' : 'album.jpg'] : []),
@@ -150,7 +159,7 @@ export default function ExportDialog({
                       leaves the dialog exactly where it is.
                     */}
                     <a
-                      href={exportFileUrl(songId, file, audioFormat)}
+                      href={exportFileUrl(songId, file, options)}
                       className="shrink-0 font-sans text-faint underline-offset-2 hover:text-fg hover:underline"
                     >
                       download
@@ -222,32 +231,35 @@ export default function ExportDialog({
             </ul>
           )}
 
-          <div>
-            <p className="ch-label">Audio format</p>
-            <div className="flex">
-              {(['wav', 'ogg'] as const).map((format) => (
-                <button
-                  key={format}
-                  type="button"
-                  onClick={() => setAudioFormat(format)}
-                  className={`border px-3 py-1.5 text-2xs uppercase tracking-widest ${
-                    audioFormat === format
-                      ? 'border-fg bg-fg text-bg'
-                      : 'border-edge2 bg-panel text-muted hover:text-fg'
-                  }`}
-                >
-                  {format}
-                </button>
-              ))}
+          <div className="flex gap-6">
+            <div>
+              <p className="ch-label">Chart format</p>
+              <FormatChoice
+                options={['chart', 'mid']}
+                value={chartFormat}
+                onChange={setChartFormat}
+              />
             </div>
-            <p className="mt-1 text-2xs text-faint">
-              {audioFormat === 'wav'
-                ? `WAV is what a Clone Hero song folder normally contains${
-                    sourceExt === '.wav' ? ' — and your audio is already WAV, so it is copied untouched.' : '.'
-                  }`
-                : 'OGG is roughly ten times smaller and identical in game, but not what most song folders use.'}
-            </p>
+            <div>
+              <p className="ch-label">Audio format</p>
+              <FormatChoice
+                options={['wav', 'ogg']}
+                value={audioFormat}
+                onChange={setAudioFormat}
+              />
+            </div>
           </div>
+
+          <p className="text-2xs text-faint">
+            {chartFormat === 'chart'
+              ? 'notes.chart is what Clone Hero song folders normally contain, and what the game reads most reliably. If a song does not show up in game, be on this.'
+              : 'notes.mid suits tools that prefer MIDI, but Clone Hero is fussier about it. If the song fails to appear in your library, switch back to .chart.'}{' '}
+            {audioFormat === 'wav'
+              ? `WAV matches the same convention${
+                  sourceExt === '.wav' ? ', and your audio is already WAV, so it is copied untouched.' : '.'
+                }`
+              : 'OGG is roughly ten times smaller and identical in game.'}
+          </p>
         </div>
 
         <footer className="flex justify-end gap-2 border-t border-edge px-4 py-3">
@@ -257,13 +269,43 @@ export default function ExportDialog({
           <button
             type="button"
             className="ch-button ch-button-primary min-w-[104px]"
-            onClick={() => onExport(audioFormat)}
+            onClick={() => onExport(options)}
             disabled={exporting || Boolean(planError)}
           >
             {exporting ? 'Packing…' : 'Export'}
           </button>
         </footer>
       </div>
+    </div>
+  );
+}
+
+/** Small segmented control, shared by the chart and audio format pickers. */
+function FormatChoice<T extends string>({
+  options,
+  value,
+  onChange,
+}: {
+  options: readonly T[];
+  value: T;
+  onChange: (next: T) => void;
+}) {
+  return (
+    <div className="flex">
+      {options.map((option) => (
+        <button
+          key={option}
+          type="button"
+          onClick={() => onChange(option)}
+          className={`border px-3 py-1.5 text-2xs uppercase tracking-widest ${
+            value === option
+              ? 'border-fg bg-fg text-bg'
+              : 'border-edge2 bg-panel text-muted hover:text-fg'
+          }`}
+        >
+          {option}
+        </button>
+      ))}
     </div>
   );
 }

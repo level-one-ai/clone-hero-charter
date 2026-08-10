@@ -15,14 +15,14 @@ library convention — that drops straight into Clone Hero's `Songs/` directory:
 
 ```
 ERRA - Gore of Being (enerbewow)/
-  notes.mid       the chart
+  notes.chart     the chart
   song.wav        the audio
   album.jpg       cover art, if you supplied one (.png also works)
   song.ini        metadata — this, not the chart, is what the song browser reads
 ```
 
-That is the whole folder: four files, nothing else. `notes.mid` and `song.wav` are what
-Clone Hero song folders normally contain, which is why they are the defaults here.
+That is the whole folder: four files, nothing else. `notes.chart` and `song.wav` are what
+Clone Hero song folders overwhelmingly contain, which is why they are the defaults.
 
 The charter's name identifies whose chart it is when several people have charted the
 same song. Set it on the New Song screen or in the editor's **Song** panel, which
@@ -53,18 +53,22 @@ always imported in musical mode — the pitches are mapped to frets by contour. 
 still chosen by name where possible, so a file with "Guitar 1" and "Drums" charts the
 guitar even though the drums have more notes.
 
-**The chart is written as MIDI.** Clone Hero loads both `.chart` and `.mid`, but `.mid`
-is what almost every song folder in the wild contains and what Moonscraper, EOF and the
-Rock Band lineage expect. `lib/chart/writeMidi.ts` writes the standard Guitar Hero layout —
-Expert 96 / Hard 84 / Medium 72 / Easy 60, `+5` forced HOPO, `+7` open note, note 116 star
-power, note 104 taps — and is the exact mirror of the importer, so a chart exported and
-re-imported comes back identical.
+**Chart format: `.chart` by default.** Clone Hero reads both `.chart` and `.mid`, but
+`.chart` is what working song folders overwhelmingly use and what the game's parser is
+most reliable with. This matters more than it sounds: if Clone Hero cannot parse a song's
+chart file, the song does not appear in the library **at all** — there is no error, it is
+simply missing. A song that will not show up is the first thing to check.
 
-One thing MIDI cannot express as precisely as the editor: star power and tap markers are
-per *song* in a `.mid`, not per difficulty. Expert's are used, and if a lower difficulty
-disagrees the export says so rather than dropping the difference silently.
+`.mid` is offered in the export dialog for tools that prefer it (EOF, the Rock Band
+lineage). `lib/chart/writeMidi.ts` writes the standard Guitar Hero layout — Expert 96 /
+Hard 84 / Medium 72 / Easy 60, `+5` forced HOPO, `+7` open note, note 116 star power, note
+104 taps — and is the exact mirror of the importer, so a chart exported and re-imported
+comes back identical. Two caveats: MIDI stores star power and tap markers per *song*
+rather than per difficulty (Expert's are used, and the export says so if a lower
+difficulty disagrees), and Clone Hero itself is fussier about `.mid` than about `.chart`.
+If a song fails to appear in game, switch back to `.chart`.
 
-**Audio format.** Exports are WAV by default, matching the convention above. WAV is
+**Audio format.** Exports are WAV by default, matching the same convention. WAV is
 written to a temporary file rather than piped, because a RIFF header states the size of
 the data that follows and ffmpeg cannot know that while writing to a pipe — a seekable
 file lets it correct the header, so what ships is an ordinary WAV rather than one that
@@ -106,7 +110,7 @@ been inside the archive — the chart carries the same lead-in offset, and the a
 same transcode. Two reasons this exists:
 
 - A Clone Hero song *is* a folder of these files; the zip is only a wrapper. Pulling a
-  tweaked `notes.mid` on its own beats re-downloading the audio with it.
+  tweaked `notes.chart` on its own beats re-downloading the audio with it.
 - Chrome's insecure-download block targets archives and executables, not text and audio.
   On a plain-HTTP deployment the dialog says so and points at these links, so an instance
   without a certificate is never a dead end. Fixing HTTPS is still the right answer, and
@@ -251,9 +255,9 @@ $DATA_DIR/
 `project.json` is the source of truth, not `notes.chart`. Round-tripping `.chart`
 through an editor is lossy: note flags are stored as separate lines sharing a tick, and
 notes carry no stable identity for selection and drag state. So the editor reads and
-writes JSON, and `notes.chart` is regenerated on every save — it can never drift. That
-copy is a readable working artifact for inspecting a project on the server; the export
-writes `notes.mid` from the same state, so the two never disagree.
+writes JSON, and `notes.chart` is regenerated on every save — it can never drift. The
+export regenerates it from the same state, so the working copy and the exported one never
+disagree.
 
 Nothing stops you editing `project.json` by hand; the app validates and normalises it
 on the next save.

@@ -193,7 +193,13 @@ export async function saveProject(project: Project): Promise<void> {
 
   const now = new Date().toISOString();
   await writeFileAtomic(projectFile(project.id), `${JSON.stringify(project, null, 2)}\n`);
-  await writeFileAtomic(path.join(dir, 'notes.chart'), writeChart(project));
+  // MusicStream names the file the EXPORT will ship, not the upload on disk, so the
+  // working copy reads the same as the exported one.
+  const audioExt = path.extname(project.audio.file || '').toLowerCase() || '.ogg';
+  await writeFileAtomic(
+    path.join(dir, 'notes.chart'),
+    writeChart(project, { musicStream: `song${audioExt}` }),
+  );
 
   let createdAt = now;
   try {

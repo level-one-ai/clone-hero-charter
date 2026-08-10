@@ -12,6 +12,7 @@ import {
 } from '@/lib/server/audio';
 import { TMP_DIR } from '@/lib/server/paths';
 import { writeMidi } from '@/lib/chart/writeMidi';
+import { writeChart } from '@/lib/chart/writeChart';
 import { exportFolderName, songDir, songFile } from '@/lib/server/paths';
 import { readProject } from '@/lib/server/storage';
 import type { Project } from '@/lib/chart/types';
@@ -26,9 +27,20 @@ import type { Project } from '@/lib/chart/types';
  * file fetched on its own is byte-identical to the same file inside the archive.
  */
 
+/**
+ * Chart file the folder will contain.
+ *
+ * `.chart` is the default because it is what Clone Hero song folders overwhelmingly use
+ * and what the game's own parser is most reliable with. `.mid` is offered for tools that
+ * prefer it (EOF, the Rock Band lineage), but if a chart will not load in game, `.chart`
+ * is the format to try first.
+ */
+export type ChartFormat = 'chart' | 'mid';
+
 export interface ExportPlan {
   project: Project;
   folderName: string;
+  chartFormat: ChartFormat;
   audioPath: string;
   audioExt: string;
   /** Format the packaged audio will be in. */
@@ -51,6 +63,7 @@ export interface ExportPlanError {
 export async function planExport(
   id: string,
   audioFormat: ExportAudioFormat = 'wav',
+  chartFormat: ChartFormat = 'chart',
 ): Promise<ExportPlan | ExportPlanError> {
   const project = await readProject(id);
   if (!project) return { error: 'Song not found', status: 404 };
@@ -99,7 +112,11 @@ export async function planExport(
     }
   }
 
-  const files = ['notes.mid', exportAudioName(canTranscode, audioFormat, audioExt), 'song.ini'];
+  const files = [
+    `notes.${chartFormat}`,
+    exportAudioName(canTranscode, audioFormat, audioExt),
+    'song.ini',
+  ];
 
   if (project.album) {
     try {
@@ -114,6 +131,7 @@ export async function planExport(
   return {
     project,
     folderName,
+    chartFormat,
     audioPath,
     audioExt,
     audioFormat,
@@ -139,6 +157,11 @@ export function exportAudioName(
   audioExt: string,
 ): string {
   return canTranscode ? `song.${audioFormat}` : `song${audioExt}`;
+}
+
+/** The audio filename this plan will produce, e.g. "song.wav". */
+export function exportAudioFileName(plan: ExportPlan): string {
+  return exportAudioName(plan.canTranscode, plan.audioFormat, plan.audioExt);
 }
 
 /**
@@ -221,6 +244,16 @@ export function resolveExportFile(
   name: string,
 ): ExportFile | null {
   if (!plan.files.includes(name)) return null;
+
+  if (name === 'notes.chart') {
+    return {
+      kind: 'text',
+      body: writeChart(exportProjectFor(plan), { musicStream: exportAudioFileName(plan) }),
+      // text/plain rather than a made-up type: browsers handle it predictably, and
+      // Content-Disposition is what actually names the file.
+      contentType: 'text/plain; charset=utf-8',
+    };
+  }
 
   if (name === 'notes.mid') {
     return {

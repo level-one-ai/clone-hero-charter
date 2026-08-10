@@ -3,13 +3,16 @@ import { Readable } from 'node:stream';
 import { NextResponse } from 'next/server';
 import { generateSongIni } from '@/lib/chart/songIni';
 import { writeMidi } from '@/lib/chart/writeMidi';
+import { writeChart } from '@/lib/chart/writeChart';
 import { isValidSongId } from '@/lib/server/paths';
 import {
   attachmentDisposition,
+  exportAudioFileName,
   exportAudioName,
   exportProjectFor,
   planExport,
   prepareExportAudio,
+  type ChartFormat,
   type ExportPlan,
 } from '@/lib/server/exportPlan';
 import type { ExportAudioFormat } from '@/lib/server/audio';
@@ -78,14 +81,20 @@ async function buildArchive(id: string, plan: ExportPlan): Promise<Response> {
     zlib: { level: 1 },
   });
 
-  // ---- notes.mid ----------------------------------------------------------------
+  // ---- the chart ------------------------------------------------------------------
   // Regenerated from the current project rather than read off disk, so an export can
   // never ship a stale chart. exportProjectFor folds the lead-in into Offset — see its
   // comment for why that beats moving ticks.
   const exportProject = exportProjectFor(plan);
-  const midi = writeMidi(exportProject);
-  archive.append(Buffer.from(midi.data), { name: `${folderName}/notes.mid` });
-  warnings.push(...midi.warnings);
+  if (plan.chartFormat === 'mid') {
+    const midi = writeMidi(exportProject);
+    archive.append(Buffer.from(midi.data), { name: `${folderName}/notes.mid` });
+    warnings.push(...midi.warnings);
+  } else {
+    archive.append(writeChart(exportProject, { musicStream: exportAudioFileName(plan) }), {
+      name: `${folderName}/notes.chart`,
+    });
+  }
 
   // ---- song.ini -----------------------------------------------------------------
   archive.append(generateSongIni(exportProject, { durationMs }), {
@@ -155,9 +164,10 @@ export async function GET(request: Request, { params }: Params) {
 
   const url = new URL(request.url);
   const audioFormat = parseAudioFormat(url.searchParams.get('audioFormat'));
+  const chartFormat = parseChartFormat(url.searchParams.get('chartFormat'));
   const dryRun = url.searchParams.get('dryRun') === '1';
 
-  const plan = await planExport(id, audioFormat);
+  const plan = await planExport(id, audioFormat, chartFormat);
   if ('error' in plan) {
     return NextResponse.json({ error: plan.error }, { status: plan.status });
   }
@@ -169,11 +179,12 @@ export async function GET(request: Request, { params }: Params) {
       warnings: plan.warnings,
       transcoding: plan.canTranscode && !plan.copyAudioVerbatim,
       audioFormat: plan.audioFormat,
+      chartFormat: plan.chartFormat,
       leadingSilenceMs: plan.leadingSilenceMs,
     });
   }
 
-  return buildArchive(id, plan);
+  return await buildArchive(id, plan);
 }
 
 /** POST — same download, options in the body. Kept for existing callers. */
@@ -182,21 +193,31 @@ export async function POST(request: Request, { params }: Params) {
   if (!isValidSongId(id)) return NextResponse.json({ error: 'Invalid song id' }, { status: 400 });
 
   let audioFormat: ExportAudioFormat = 'wav';
+  let chartFormat: ChartFormat = 'chart';
   try {
-    const body = (await request.json()) as { audioFormat?: string } | null;
+    const body = (await request.json()) as {
+      audioFormat?: string;
+      chartFormat?: string;
+    } | null;
     audioFormat = parseAudioFormat(body?.audioFormat ?? null);
+    chartFormat = parseChartFormat(body?.chartFormat ?? null);
   } catch {
     // No body is fine — defaults apply.
   }
 
-  const plan = await planExport(id, audioFormat);
+  const plan = await planExport(id, audioFormat, chartFormat);
   if ('error' in plan) {
     return NextResponse.json({ error: plan.error }, { status: plan.status });
   }
-  return buildArchive(id, plan);
+  return await buildArchive(id, plan);
 }
 
 /** WAV unless OGG is asked for explicitly — see the module comment. */
 function parseAudioFormat(value: string | null): ExportAudioFormat {
   return value === 'ogg' ? 'ogg' : 'wav';
+}
+
+/** .chart unless .mid is asked for explicitly — see ChartFormat in exportPlan. */
+function parseChartFormat(value: string | null): ChartFormat {
+  return value === 'mid' ? 'mid' : 'chart';
 }

@@ -30,7 +30,16 @@ function section(name: string, body: string[]): string {
   return lines.join(EOL);
 }
 
-export function writeChart(project: Project): string {
+export interface WriteChartOptions {
+  /**
+   * Filename to put in `MusicStream`. Clone Hero finds `song.*` regardless of what this
+   * says — real charts in the wild have stale values here — but naming the file we
+   * actually ship costs nothing and is one less thing to look wrong.
+   */
+  musicStream?: string;
+}
+
+export function writeChart(project: Project, options: WriteChartOptions = {}): string {
   const blocks: string[] = [];
 
   // ---- [Song] ------------------------------------------------------------------
@@ -48,7 +57,7 @@ export function writeChart(project: Project): string {
     `PreviewEnd = 0`,
     `Genre = ${quote(project.meta.genre)}`,
     `MediaType = ${quote(project.meta.mediaType || 'cd')}`,
-    `MusicStream = ${quote('song.ogg')}`,
+    `MusicStream = ${quote(options.musicStream ?? 'song.ogg')}`,
   ];
   blocks.push(section('Song', songBody));
 
