@@ -187,18 +187,21 @@ export async function readProject(id: string): Promise<Project | null> {
  * the index entry. Keeping chart generation here means the .chart on disk can never
  * drift from project.json — there is no code path that writes one without the other.
  */
-export async function saveProject(project: Project): Promise<void> {
+export async function saveProject(project: Project): Promise<Project> {
   const dir = songDir(project.id);
   await fs.mkdir(dir, { recursive: true });
 
   const now = new Date().toISOString();
-  await writeFileAtomic(projectFile(project.id), `${JSON.stringify(project, null, 2)}\n`);
+  // The server owns the revision. Bumping it here — the one place a project is written —
+  // is what lets the chart route detect a save built on a stale copy.
+  const stored: Project = { ...project, revision: (project.revision ?? 0) + 1 };
+  await writeFileAtomic(projectFile(project.id), `${JSON.stringify(stored, null, 2)}\n`);
   // MusicStream names the file the EXPORT will ship, not the upload on disk, so the
   // working copy reads the same as the exported one.
   const audioExt = path.extname(project.audio.file || '').toLowerCase() || '.ogg';
   await writeFileAtomic(
     path.join(dir, 'notes.chart'),
-    writeChart(project, { musicStream: `song${audioExt}` }),
+    writeChart(stored, { musicStream: `song${audioExt}` }),
   );
 
   let createdAt = now;
@@ -208,7 +211,8 @@ export async function saveProject(project: Project): Promise<void> {
   } catch {
     // Fall back to now.
   }
-  await upsertIndexEntry(indexEntryFromProject(project, createdAt, now));
+  await upsertIndexEntry(indexEntryFromProject(stored, createdAt, now));
+  return stored;
 }
 
 export async function deleteProject(id: string): Promise<void> {

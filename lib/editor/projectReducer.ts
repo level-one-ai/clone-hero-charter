@@ -33,7 +33,21 @@ export interface EditorState {
 }
 
 export type EditorAction =
-  | { type: 'addNote'; track: TrackName; tick: number; lane: Lane; length?: number }
+  /**
+   * `id` lets the caller know the note's identity up front — live keyboard entry needs
+   * it so a key release can find the note it started and turn it into a sustain.
+   */
+  | {
+      type: 'addNote';
+      track: TrackName;
+      tick: number;
+      lane: Lane;
+      length?: number;
+      forced?: boolean;
+      id?: string;
+    }
+  /** Set several note lengths in one history step, e.g. sustain-to-next on a selection. */
+  | { type: 'setNoteLengths'; track: TrackName; changes: Array<{ id: string; length: number }> }
   | { type: 'moveNotes'; track: TrackName; ids: string[]; deltaTick: number; deltaLane: number }
   | { type: 'setNoteLength'; track: TrackName; id: string; length: number }
   | { type: 'deleteNotes'; track: TrackName; ids: string[] }
@@ -60,7 +74,13 @@ export type EditorAction =
   | { type: 'deleteBpm'; tick: number }
   | { type: 'upsertTimeSignature'; marker: TimeSignature }
   | { type: 'deleteTimeSignature'; tick: number }
-  | { type: 'setMeta'; meta: Partial<Project['meta']> }
+  /**
+   * `transient` marks an intermediate value from a continuous gesture — dragging the
+   * lead-in grip fires on every pointer move. Those still update the project so the UI
+   * tracks the drag, but they stay out of undo history; only the release is recorded, so
+   * one undo takes back the whole drag rather than one pixel of it.
+   */
+  | { type: 'setMeta'; meta: Partial<Project['meta']>; transient?: boolean }
   | { type: 'setStarPower'; track: TrackName; phrases: Project['tracks'][TrackName]['starPower'] }
   | { type: 'undo' }
   | { type: 'redo' }
@@ -77,6 +97,7 @@ export function createEditorState(project: Project): EditorState {
 
 /** Actions that only affect the UI, not the chart, and so must not enter history. */
 function isHistoryAction(action: EditorAction): boolean {
+  if (action.type === 'setMeta' && action.transient) return false;
   switch (action.type) {
     case 'select':
     case 'selectAll':
@@ -194,16 +215,31 @@ function applyEdit(project: Project, action: EditorAction): Project {
       if (duplicate) return project;
 
       const note: Note = {
-        id: newNoteId(),
+        id: action.id ?? newNoteId(),
         tick: action.tick,
         lane: action.lane,
         length: action.length ?? 0,
-        forced: false,
+        forced: action.forced ?? false,
         tap: false,
       };
       const removed = new Set(conflicting.map((n) => n.id));
       const notes = track.notes.filter((n) => !removed.has(n.id)).concat(note);
       return withTrack(project, action.track, sortNotes(notes), track.starPower);
+    }
+
+    case 'setNoteLengths': {
+      if (action.changes.length === 0) return project;
+      const track = project.tracks[action.track];
+      const byId = new Map(action.changes.map((c) => [c.id, Math.max(0, Math.round(c.length))]));
+      let changed = false;
+      const notes = track.notes.map((note) => {
+        const length = byId.get(note.id);
+        if (length === undefined || length === note.length) return note;
+        changed = true;
+        return { ...note, length };
+      });
+      if (!changed) return project;
+      return withTrack(project, action.track, notes, track.starPower);
     }
 
     case 'pasteNotes': {

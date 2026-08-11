@@ -46,10 +46,13 @@ describe('exportAudioName', () => {
 });
 
 describe('exportProjectFor', () => {
-  it('folds the lead-in into the offset', () => {
+  it('does NOT fold the lead-in into the offset', () => {
+    // The audio is padded with real silence instead, so the padded timeline is chart
+    // time. Adding it to Offset too would cancel the pad out and undo the whole point
+    // of dragging the waveform right.
     const plan = planWith({ leadingSilenceMs: 2000 });
     plan.project.meta.offset = 0.5;
-    expect(exportProjectFor(plan).meta.offset).toBeCloseTo(2.5, 6);
+    expect(exportProjectFor(plan).meta.offset).toBeCloseTo(0.5, 6);
   });
 
   it('leaves the offset alone with no lead-in', () => {

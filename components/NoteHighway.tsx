@@ -44,6 +44,8 @@ interface Props {
   starPowerTool: { active: boolean; startTick: number | null };
   /** A click while the tool is armed, already snapped to the grid. */
   onStarPowerClick: (tick: number) => void;
+  /** Double-clicking a note extends it to just before the next note on its lane. */
+  onSustainNote: (id: string) => void;
 }
 
 type DragState =
@@ -58,7 +60,13 @@ type DragState =
       moved: boolean;
     }
   | { kind: 'sustain'; id: string; noteTick: number; length: number }
-  | { kind: 'marquee'; x0: number; y0: number; x1: number; y1: number };
+  | { kind: 'marquee'; x0: number; y0: number; x1: number; y1: number }
+  /**
+   * Painting a selection: a bare drag starting on empty space picks up every note the
+   * pointer passes over. `moved` distinguishes it from a plain click, which still places
+   * a note — the gesture only becomes a selection once the pointer actually travels.
+   */
+  | { kind: 'paint'; moved: boolean; originX: number; originY: number };
 
 export default function NoteHighway({
   project,
@@ -72,6 +80,7 @@ export default function NoteHighway({
   onSeek,
   starPowerTool,
   onStarPowerClick,
+  onSustainNote,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [drag, setDrag] = useState<DragState>({ kind: 'none' });
@@ -85,6 +94,14 @@ export default function NoteHighway({
    * means.
    */
   const anchorTickRef = useRef<number | null>(null);
+  /**
+   * Notes picked up by the current paint drag.
+   *
+   * A ref, not state: pointermove fires far faster than React re-renders, and several
+   * moves inside one batch would each read the same stale set and overwrite each other —
+   * so a quick sweep across four notes would select only the last one.
+   */
+  const paintedRef = useRef<Set<string>>(new Set());
 
   // A range is meaningless once the selection is gone or the difficulty changed, and a
   // stale anchor would make the next shift-click select a surprising span.
@@ -278,16 +295,15 @@ export default function NoteHighway({
       return;
     }
 
-    // Empty space inside the lanes: shift-drag marquee-selects, plain click adds.
+    // Empty space inside the lanes: shift-drag marquee-selects, a bare drag paints a
+    // selection, and a bare click (no movement) places a note — resolved on pointer up.
     if (event.shiftKey) {
       setDrag({ kind: 'marquee', x0: position.x, y0: position.y, x1: position.x, y1: position.y });
       return;
     }
 
-    if (lane !== null) {
-      const tick = snapTick(Math.max(0, yToTick(position.y, ctx)), project.resolution, snap, timing);
-      dispatch({ type: 'addNote', track: trackName, tick, lane: lane as Lane });
-    }
+    paintedRef.current = new Set();
+    setDrag({ kind: 'paint', moved: false, originX: position.x, originY: position.y });
   };
 
   const handlePointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -352,6 +368,24 @@ export default function NoteHighway({
 
     if (drag.kind === 'marquee') {
       setDrag({ ...drag, x1: position.x, y1: position.y });
+      return;
+    }
+
+    if (drag.kind === 'paint') {
+      // A few pixels of slop so a slightly shaky click still places a note rather than
+      // turning into an empty selection.
+      const moved =
+        drag.moved ||
+        Math.hypot(position.x - drag.originX, position.y - drag.originY) > PAINT_THRESHOLD_PX;
+
+      const hit = hitTestNote(track.notes, position.x, position.y, ctx);
+      const before = paintedRef.current.size;
+      if (hit) paintedRef.current.add(hit.note.id);
+
+      if (moved && (paintedRef.current.size !== before || !drag.moved)) {
+        dispatch({ type: 'select', ids: [...paintedRef.current] });
+      }
+      if (moved !== drag.moved) setDrag({ ...drag, moved });
     }
   };
 
@@ -381,9 +415,36 @@ export default function NoteHighway({
         if (noteX >= minX && noteX <= maxX && noteY >= minY && noteY <= maxY) ids.push(note.id);
       }
       dispatch({ type: 'select', ids, additive: event.shiftKey });
+    } else if (drag.kind === 'paint' && ctx) {
+      if (drag.moved) {
+        dispatch({ type: 'select', ids: [...paintedRef.current] });
+      } else {
+        // Never moved: this was a click on an empty lane, so place a note.
+        const position = pointerPosition(event);
+        const lane = position ? xToLane(position.x, ctx) : null;
+        if (position && lane !== null) {
+          const tick = snapTick(
+            Math.max(0, yToTick(position.y, ctx)),
+            project.resolution,
+            snap,
+            timing,
+          );
+          dispatch({ type: 'addNote', track: trackName, tick, lane: lane as Lane });
+        }
+      }
     }
 
     setDrag({ kind: 'none' });
+  };
+
+  /** Double-click a note to run its sustain up to just before the next one on its lane. */
+  const handleDoubleClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    if (starPowerTool.active) return;
+    const position = pointerPosition(event);
+    const ctx = hitContext();
+    if (!position || !ctx) return;
+    const hit = hitTestNote(track.notes, position.x, position.y, ctx);
+    if (hit) onSustainNote(hit.note.id);
   };
 
   const handleContextMenu = (event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -441,6 +502,7 @@ export default function NoteHighway({
           setCursorTick(null);
         }}
         onContextMenu={handleContextMenu}
+        onDoubleClick={handleDoubleClick}
       />
 
       {contextMenu && (
@@ -566,6 +628,9 @@ function NoteContextMenu({
     </div>
   );
 }
+
+/** Pointer travel, in CSS pixels, before a drag counts as painting rather than a click. */
+const PAINT_THRESHOLD_PX = 4;
 
 function clampLane(lane: number): Lane {
   return Math.max(0, Math.min(4, lane)) as Lane;

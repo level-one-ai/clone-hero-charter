@@ -301,12 +301,17 @@ so repeated notes on one fret correctly stay strums however close together they 
 | `Space` | Play / pause |
 | `Home` | Jump to the start |
 | Mouse wheel | Scrub the timeline (hold Shift to move faster) |
+| `A` `S` `D` `F` `G` | Play the frets in at the playhead; hold for a sustain, `Shift` for a hammer-on |
+| `Space` | Open note (play/pause moved to `Enter`) |
+| `Enter` | Play / pause |
+| `Alt` + `H` / `T` / `O` | Force HOPO / tap / open on the selection |
+| `Alt` + `E` / `S` | Sustain to the next note / clear sustains |
+| `Alt` + `P` | Star power tool |
 | `Ctrl`/`Cmd` + `A` | Select everything in this difficulty |
 | Shift + click a note | Select everything between it and the last note you clicked |
 | `Ctrl`/`Cmd` + click | Add or remove a single note |
 | `Ctrl`/`Cmd` + `C` / `X` / `V` | Copy / cut / paste a block |
 | `Alt` + `←` / `→` | Move the selection down or up a fret |
-| `P` | Arm the star power tool, then click the phrase's start and end |
 | `Ctrl`/`Cmd` + `Z` / `Shift+Z` | Undo / redo |
 | `Ctrl`/`Cmd` + `S` | Save now |
 
@@ -315,6 +320,21 @@ is behind the **?** in the transport bar.
 
 Edits autosave 1.5 seconds after you stop, and the tab warns before closing with
 unsaved changes.
+
+### Playing notes in from the keyboard
+
+The fastest way to chart is to play along. Press `Enter`, then play the part on
+`A` `S` `D` `F` `G` (green to orange, left to right under your hand) with `Space` for open
+notes. Hold a key and the note becomes a sustain ending where you release; hold `Shift` as
+you press and it becomes a forced hammer-on; press several keys together for a chord.
+
+Notes land on the playhead snapped to the current grid, read from the playback clock
+rather than from React state — a note placed a quarter of a second behind where you heard
+it would be worse than useless.
+
+This is why `Space` is no longer play/pause and why every tool shortcut moved onto `Alt`:
+bare letters belong to note entry now, so nothing you press while playing along can
+silently retag your selection. `1`–`5` and `0` still work for anyone who learned them.
 
 ### Selecting a passage, and copy/paste
 
@@ -330,6 +350,10 @@ wherever you put it. Pasting over existing notes replaces them.
 
 Copying into a different difficulty is the point rather than an accident: copy the Expert
 chorus, switch to Hard, paste, thin it out.
+
+Dragging across notes with the button held selects everything the pointer passes over. A
+drag that starts *on* a note still moves it, and a click on an empty lane still places one
+— the gestures are told apart by whether the pointer travels.
 
 Star power, sections and tempo are deliberately not part of a copied block. They belong to
 the song rather than to a run of notes, and pasting should never quietly change phrasing
@@ -349,6 +373,31 @@ melodically coherent.
 
 It replaces the difficulty, so it asks first, and it is a single undo away. Treat the
 result as a starting point to review rather than a finished chart.
+
+### Merging extra MIDI files
+
+A single MIDI export often covers only part of a song. **Song → Re-import from MIDI →
+Merge extra files** takes any number of `.mid` or Guitar Pro files and fills the gaps with
+them, *without touching anything already charted*.
+
+"Already covered" is deliberately generous: a candidate note is skipped when any existing
+note sits within an eighth note of it, not only when one lands on the same tick. Two
+transcriptions of the same passage never agree tick-for-tick, and a second copy of a riff
+a thirty-second out of step is far more work to unpick than a gap is to fill by hand. The
+result reports how many notes went in and how many were skipped.
+
+### Saving, with more than one person editing
+
+Every write bumps a server-owned `revision`, and a save carries the revision it was based
+on. If someone else has saved in the meantime the server returns **409** instead of
+accepting a write built on a stale copy, and the editor offers a straight choice: take
+theirs, or overwrite with yours. Before this, two people on one song simply overwrote each
+other and whoever saved last won, silently.
+
+Edits are also flushed on the way out. `beforeunload` does not fire on in-app navigation,
+so leaving via **← Songs** inside the 1.5s autosave debounce used to lose the last edit;
+that link now saves before it navigates, with `pagehide` + `sendBeacon` as a backstop for
+what `beforeunload` cannot catch at all — a closed lid, a tab evicted on mobile.
 
 ### The chart check
 
@@ -388,13 +437,22 @@ not accept overlapping phrases.
 
 ### Lead-in silence
 
-Under **Sync**. Adds real silence to the front of the exported audio so the song starts a
-little later, giving you room to get your bearings before the first note.
+**Drag the grip at the left of the waveform to the right.** The music slides later and the
+highway gains empty space before the first beat — which is what you need when a song
+starts too fast to chart its opening. The number of seconds is shown in the hatched gutter
+as you drag, and the field under **Sync** still takes an exact value.
 
-Nothing moves on the highway. The silence is added to the audio with ffmpeg at export
-time, and the chart's `Offset` is increased to match, so the two stay in step
-automatically and `song_length` accounts for it. midi-ch has the same setting but leaves
-padding the audio to you in a DAW.
+The notes you have already placed do **not** move: the music moves relative to them. Tick
+0 becomes the start of the silence.
+
+The editor previews this honestly rather than approximating it. An `<audio>` element has
+no negative time, so the silence cannot come from the file; the clock runs the lead-in on
+`performance.now()` and hands over to the audio when it elapses. What you hear against the
+highway is what the game plays.
+
+At export, ffmpeg prepends the real silence and `Offset` is deliberately left alone — the
+padded file's timeline already *is* chart time, so adding the lead-in to `Offset` as well
+would cancel the padding out. `song_length` accounts for it.
 
 ### Song properties
 

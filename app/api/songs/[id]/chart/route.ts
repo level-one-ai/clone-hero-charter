@@ -47,18 +47,48 @@ export async function PUT(request: Request, { params }: Params) {
     );
   }
 
+  /**
+   * LOST-UPDATE CHECK.
+   *
+   * The editor autosaves the whole project, so two people on the same song — or one
+   * person with it open on a laptop and a desktop — would otherwise overwrite each
+   * other, and whoever saved last would win silently. The client sends the revision it
+   * loaded; if the stored one has moved past it, this save was built on a stale copy and
+   * is refused so the UI can say so.
+   *
+   * A missing revision means an older client or a project saved before revisions
+   * existed; those still save, because refusing them would break the app for anyone who
+   * had not reloaded.
+   */
+  const clientRevision = parsed.data.revision;
+  const storedRevision = existing.revision ?? 0;
+  if (clientRevision !== undefined && clientRevision < storedRevision) {
+    return NextResponse.json(
+      {
+        error:
+          'This song was changed somewhere else since you opened it. Saving now would overwrite those changes.',
+        conflict: true,
+        storedRevision,
+        yourRevision: clientRevision,
+      },
+      { status: 409 },
+    );
+  }
+
   const project = normalizeProject(parsed.data);
   project.id = id;
+  project.revision = storedRevision;
   // Audio identity and duration are server-measured facts, not client opinions.
   project.audio = existing.audio;
   project.album = existing.album;
 
+  let stored;
   try {
-    await saveProject(project);
+    stored = await saveProject(project);
   } catch (error) {
     console.error(`Failed to save chart for ${id}:`, error);
     return NextResponse.json({ error: 'Could not write the chart to disk' }, { status: 500 });
   }
 
-  return NextResponse.json({ ok: true, project });
+  return NextResponse.json({ ok: true, project: stored });
 }

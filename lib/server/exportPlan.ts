@@ -165,22 +165,21 @@ export function exportAudioFileName(plan: ExportPlan): string {
 }
 
 /**
- * The project as it should be written out, with the lead-in folded into `offset`.
+ * The project as it should be written out.
  *
- * Lead-in silence is expressed through the chart's Offset rather than by moving ticks.
- * Offset delays the chart against the audio, which is exactly what padding the front of
- * the audio requires — and it keeps every note, tempo marker and time signature where
- * the editor put it. Shifting ticks instead would mean converting a duration to ticks
- * through the tempo map, which is both lossy and needless.
+ * `Offset` is left ALONE, deliberately. The lead-in pushes the music later while the
+ * notes stay where they are: the exported audio gets real silence prepended, so the
+ * padded file's timeline IS chart time and tick 0 is the start of the silence. Adding
+ * the lead-in to Offset as well would cancel the pad out — silence would appear at the
+ * front but nothing would move relative to anything, which is not what dragging the
+ * waveform right is for.
+ *
+ * (This is the inverse of the earlier behaviour. The old rule kept existing notes glued
+ * to the music; the new one gives you empty highway before the first beat, which is what
+ * you need when a song starts too fast to chart the opening.)
  */
 export function exportProjectFor(plan: ExportPlan): Project {
-  return {
-    ...plan.project,
-    meta: {
-      ...plan.project.meta,
-      offset: plan.project.meta.offset + plan.leadingSilenceMs / 1000,
-    },
-  };
+  return plan.project;
 }
 
 /**

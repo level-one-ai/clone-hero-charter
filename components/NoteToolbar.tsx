@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { LANE_COLORS, type Lane, type Note } from '@/lib/chart/types';
 
 /**
@@ -24,6 +25,8 @@ interface Props {
   onToggleFlag: (flag: 'forced' | 'tap') => void;
   onClearSustain: () => void;
   onDelete: () => void;
+  /** Extend the selection's sustains to just before the next note on each lane. */
+  onSustain: () => void;
   onCopy: (cut: boolean) => void;
   onPaste: () => void;
   /** What is on the clipboard, or null when nothing has been copied yet. */
@@ -45,6 +48,7 @@ export default function NoteToolbar({
   onToggleFlag,
   onClearSustain,
   onDelete,
+  onSustain,
   onCopy,
   onPaste,
   clipboardLabel,
@@ -53,6 +57,7 @@ export default function NoteToolbar({
   onToggleStarPowerTool,
   totalNotes,
 }: Props) {
+  const [more, setMore] = useState(false);
   const count = selectedNotes.length;
   const none = count === 0;
 
@@ -62,7 +67,7 @@ export default function NoteToolbar({
   const allTap = !none && selectedNotes.every((n) => n.tap);
 
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-edge bg-panel px-4 py-2">
+    <div className="flex items-center gap-x-3 overflow-x-auto border-b border-edge bg-panel px-4 py-1.5">
       <div className="flex items-center gap-2">
         <span className="text-2xs uppercase tracking-widest text-faint">
           {none ? 'Nothing selected' : `${count} selected`}
@@ -137,6 +142,12 @@ export default function NoteToolbar({
         </button>
       </Group>
 
+      {/*
+        Set-fret swatches and the destructive actions live behind "More". They are worth
+        having but are not what you reach for while charting, and on a laptop they were
+        what pushed this bar onto a second row and the highway down the screen.
+      */}
+      {more && (
       <Group label="Set fret">
         {([0, 1, 2, 3, 4] as Lane[]).map((lane) => (
           <button
@@ -155,13 +166,14 @@ export default function NoteToolbar({
           type="button"
           onClick={() => onSetLane(7)}
           disabled={none}
-          title="Make the selection open notes (0)"
+          title="Make the selection open notes (Alt+O)"
           className="h-6 border border-edge2 px-2 text-2xs disabled:opacity-30"
           style={{ backgroundColor: none ? 'transparent' : LANE_COLORS[7], color: '#0a0a0a' }}
         >
           Open
         </button>
       </Group>
+      )}
 
       <Group label="Type">
         <button
@@ -169,7 +181,7 @@ export default function NoteToolbar({
           className={`ch-button ${allForced ? 'ch-button-primary' : ''}`}
           onClick={() => onToggleFlag('forced')}
           disabled={none}
-          title="Force hammer-on / pull-off, or force a strum (F)"
+          title="Force hammer-on / pull-off, or force a strum (Alt+H)"
         >
           HOPO
         </button>
@@ -178,7 +190,7 @@ export default function NoteToolbar({
           className={`ch-button ${allTap ? 'ch-button-primary' : ''}`}
           onClick={() => onToggleFlag('tap')}
           disabled={none}
-          title="Tap note — no strum needed (T)"
+          title="Tap note — no strum needed (Alt+T)"
         >
           Tap
         </button>
@@ -195,13 +207,30 @@ export default function NoteToolbar({
           className={`ch-button ${starPowerArmed ? 'ch-button-primary' : ''}`}
           onClick={onToggleStarPowerTool}
           aria-pressed={starPowerArmed}
-          title="Draw a star power phrase: click its start on the highway, then its end (P)"
+          title="Draw a star power phrase: click its start on the highway, then its end (Alt+P)"
         >
           Star power
         </button>
-        <button type="button" className="ch-button" onClick={onClearSustain} disabled={none}>
-          Clear sustain
+        <button
+          type="button"
+          className="ch-button"
+          onClick={onSustain}
+          disabled={none}
+          title="Extend each selected note to just before the next one on its lane (Alt+E)"
+        >
+          Sustain
         </button>
+        {more && (
+          <button
+            type="button"
+            className="ch-button"
+            onClick={onClearSustain}
+            disabled={none}
+            title="Remove sustains (Alt+S)"
+          >
+            Clear sustain
+          </button>
+        )}
         <button
           type="button"
           className="ch-button ch-button-danger"
@@ -212,6 +241,16 @@ export default function NoteToolbar({
           Delete
         </button>
       </Group>
+
+      <button
+        type="button"
+        className="ch-button px-2"
+        onClick={() => setMore((v) => !v)}
+        aria-expanded={more}
+        title={more ? 'Hide the extra actions' : 'Show set-fret and clear-sustain'}
+      >
+        {more ? 'Less ‹' : 'More ›'}
+      </button>
 
       {starPowerHint && (
         <span

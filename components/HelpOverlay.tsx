@@ -18,9 +18,19 @@ interface Props {
 
 const GROUPS: Array<{ title: string; rows: Array<[string, string]> }> = [
   {
+    title: 'Playing notes in',
+    rows: [
+      ['A S D F G', 'Green, red, yellow, blue, orange at the playhead'],
+      ['Space', 'Open note'],
+      ['Hold a key', 'The note becomes a sustain, ending where you let go'],
+      ['Shift + key', 'The note is a forced hammer-on'],
+      ['Several at once', 'A chord'],
+    ],
+  },
+  {
     title: 'Playback',
     rows: [
-      ['Space', 'Play / pause'],
+      ['Enter', 'Play / pause'],
       ['Home', 'Jump to the start'],
       ['Mouse wheel', 'Scrub the timeline'],
       ['Shift + wheel', 'Scrub faster'],
@@ -30,10 +40,10 @@ const GROUPS: Array<{ title: string; rows: Array<[string, string]> }> = [
     title: 'Placing notes',
     rows: [
       ['Click a lane', 'Place a note at the nearest snap point'],
-      ['1 – 5', 'Place on that fret at the playhead'],
-      ['0', 'Place an open note at the playhead'],
+      ['1 – 5 / 0', 'Place on that fret / an open note at the playhead'],
       ['Drag a note', 'Move it'],
       ['Drag its tail', 'Extend into a sustain'],
+      ['Double-click a note', 'Sustain it up to the next note on its lane'],
     ],
   },
   {
@@ -42,6 +52,7 @@ const GROUPS: Array<{ title: string; rows: Array<[string, string]> }> = [
       ['Click a note', 'Select it, and anchor a range here'],
       ['Shift + click', 'Select everything between the anchor and this note'],
       ['Ctrl / Cmd + click', 'Add or remove just this note'],
+      ['Drag across notes', 'Select everything the pointer passes over'],
       ['Shift + drag', 'Marquee select'],
       ['Ctrl / Cmd + A', 'Select everything in this difficulty'],
       ['Esc', 'Clear the selection'],
@@ -51,8 +62,11 @@ const GROUPS: Array<{ title: string; rows: Array<[string, string]> }> = [
     title: 'Editing the selection',
     rows: [
       ['Alt + ← / →', 'Move down or up a fret'],
-      ['F', 'Force HOPO, or force a strum'],
-      ['T', 'Toggle tap notes'],
+      ['Alt + H', 'Force HOPO, or force a strum'],
+      ['Alt + T', 'Toggle tap notes'],
+      ['Alt + O', 'Make open notes'],
+      ['Alt + E', 'Sustain to the next note'],
+      ['Alt + S', 'Clear sustains'],
       ['Delete', 'Remove'],
       ['Right-click', 'Context menu'],
     ],
@@ -68,7 +82,7 @@ const GROUPS: Array<{ title: string; rows: Array<[string, string]> }> = [
   {
     title: 'Star power',
     rows: [
-      ['P', 'Arm the star power tool'],
+      ['Alt + P', 'Arm the star power tool'],
       ['Click, click', 'Set the start of the phrase, then its end'],
       ['Esc', 'Cancel while placing'],
     ],

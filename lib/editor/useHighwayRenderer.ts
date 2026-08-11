@@ -25,8 +25,11 @@ import type { SnapDivision } from '../chart/snap';
 export const HIGHWAY = {
   /** Fraction of canvas height at which the strike line sits. */
   strikeLineY: 0.82,
-  laneWidth: 60,
-  noteHeight: 18,
+  // Widened once the waveform and toolbar gave vertical space back: the notes were
+  // small in the middle of a lot of empty screen, and lane width is what makes a chord
+  // readable at a glance while it scrolls.
+  laneWidth: 76,
+  noteHeight: 22,
   /** Total width of the 5 lanes. */
   get width() {
     return this.laneWidth * 5;
@@ -74,6 +77,17 @@ export interface PlaybackClock {
   /** performance.now() when that reading was taken. */
   wallClock: number;
   playing: boolean;
+  /**
+   * Playback speed. Interpolation MUST scale by this or the highway and the music come
+   * apart — see currentTime.
+   */
+  rate: number;
+  /**
+   * True while the playhead is inside the lead-in silence, before the audio has started.
+   * The audio element has no negative time, so this stretch is driven by the wall clock
+   * alone; `audioTime` still counts in chart seconds throughout.
+   */
+  preRoll: boolean;
 }
 
 const COLORS = {
@@ -158,13 +172,19 @@ export function useHighwayRenderer(
  * THE JITTER FIX: an <audio> element updates currentTime far less often than 60Hz —
  * roughly every 250ms in Chrome. Reading it directly each frame makes the highway
  * visibly stutter: it freezes, then jumps. Instead we take a reading plus a
- * performance.now() stamp, and advance by real elapsed time between readings. The
- * result is smooth motion that re-anchors to the true audio clock on every update, so
- * it cannot drift.
+ * performance.now() stamp, and advance by elapsed time between readings. The result is
+ * smooth motion that re-anchors to the true audio clock on every update, so it cannot
+ * drift.
+ *
+ * SCALING BY `rate` IS NOT OPTIONAL. Elapsed wall time is not elapsed song time at any
+ * speed but 1×. Without it, half-speed playback ran the highway at twice the music's
+ * pace for up to 250ms and then snapped back on the next reading — which read as the
+ * whole editor lagging and losing sync, and was worst at exactly the slow speeds you
+ * would use to chart a hard passage.
  */
-export function currentTime(clock: PlaybackClock): number {
+export function currentTime(clock: PlaybackClock, now = performance.now()): number {
   if (!clock.playing) return clock.audioTime;
-  return clock.audioTime + (performance.now() - clock.wallClock) / 1000;
+  return clock.audioTime + ((now - clock.wallClock) / 1000) * clock.rate;
 }
 
 /** A note plus everything needed to draw it, resolved once per frame. */

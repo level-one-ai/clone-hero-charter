@@ -127,13 +127,75 @@ export async function applyReimport(
   return body.project;
 }
 
-export async function saveChart(id: string, project: Project): Promise<void> {
-  await unwrap<{ ok: true }>(
-    await fetch(`/api/songs/${id}/chart`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(project),
-    }),
+export interface MergeResult {
+  project: Project;
+  added: number;
+  skipped: number;
+  perFile: Array<{ name: string; added: number; skipped: number; track: string }>;
+  warnings: string[];
+}
+
+/**
+ * Merge extra MIDI or Guitar Pro files into the gaps in this chart.
+ *
+ * Nothing already charted is touched — the server only adds notes where there is nothing
+ * within an eighth note already.
+ */
+export async function mergeMidiFiles(id: string, files: File[]): Promise<MergeResult> {
+  const form = new FormData();
+  for (const file of files) form.append('files', file);
+  return unwrap<MergeResult>(
+    await fetch(`/api/songs/${id}/reimport/merge`, { method: 'POST', body: form }),
+  );
+}
+
+/** Thrown when the song changed elsewhere since this client loaded it. */
+export class SaveConflictError extends Error {
+  readonly storedRevision: number;
+  constructor(message: string, storedRevision: number) {
+    super(message);
+    this.name = 'SaveConflictError';
+    this.storedRevision = storedRevision;
+  }
+}
+
+/**
+ * Save the chart, returning the stored project so the caller can pick up the new
+ * revision. A 409 means someone else saved first — see the route for why that is refused
+ * rather than silently accepted.
+ */
+export async function saveChart(id: string, project: Project): Promise<Project> {
+  const response = await fetch(`/api/songs/${id}/chart`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(project),
+  });
+
+  if (response.status === 409) {
+    const body = (await response.json()) as { error?: string; storedRevision?: number };
+    throw new SaveConflictError(
+      body.error ?? 'This song was changed somewhere else.',
+      body.storedRevision ?? 0,
+    );
+  }
+
+  const body = await unwrap<{ ok: true; project: Project }>(response);
+  return body.project;
+}
+
+/**
+ * Last-ditch save for a page that is going away.
+ *
+ * `fetch` is cancelled when the document unloads; `sendBeacon` is handed to the browser
+ * and delivered regardless. It covers what `beforeunload` cannot — a closed lid, a tab
+ * evicted on mobile — and is fire-and-forget by design, so it is a backstop for the
+ * normal save rather than a replacement.
+ */
+export function saveChartBeacon(id: string, project: Project): boolean {
+  if (typeof navigator === 'undefined' || !navigator.sendBeacon) return false;
+  return navigator.sendBeacon(
+    `/api/songs/${id}/chart`,
+    new Blob([JSON.stringify(project)], { type: 'application/json' }),
   );
 }
 

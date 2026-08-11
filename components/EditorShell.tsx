@@ -1,6 +1,6 @@
 'use client';
 
-import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import ExportDialog from './ExportDialog';
 import HelpOverlay from './HelpOverlay';
@@ -8,6 +8,7 @@ import NoteHighway from './NoteHighway';
 import NoteToolbar from './NoteToolbar';
 import SectionsPanel from './SectionsPanel';
 import ChartCheckPanel from './ChartCheckPanel';
+import KeyLegend from './KeyLegend';
 import ReimportDialog from './ReimportDialog';
 import SongPropertiesPanel from './SongPropertiesPanel';
 import SyncPanel from './SyncPanel';
@@ -17,10 +18,20 @@ import { TimingMap } from '@/lib/chart/timing';
 import { snapTick, type SnapDivision } from '@/lib/chart/snap';
 import {
   DIFFICULTIES,
+  newNoteId,
   trackNameFor,
   type Difficulty,
+  type Lane,
   type Project,
 } from '@/lib/chart/types';
+import { sustainSelectionToNext, sustainToNext } from '@/lib/chart/sustain';
+import {
+  createLiveEntryState,
+  isEntryKey,
+  pressKey,
+  registerHeld,
+  releaseKey,
+} from '@/lib/editor/liveEntry';
 import { createEditorState, editorReducer } from '@/lib/editor/projectReducer';
 import { describeReduction, reduceNotes } from '@/lib/chart/generateDifficulty';
 import {
@@ -29,7 +40,7 @@ import {
   pasteAt,
   type ClipboardBlock,
 } from '@/lib/editor/clipboard';
-import type { PlaybackClock } from '@/lib/editor/useHighwayRenderer';
+import { currentTime, type PlaybackClock } from '@/lib/editor/useHighwayRenderer';
 import {
   STAR_POWER_TOOL_ARMED,
   STAR_POWER_TOOL_OFF,
@@ -37,7 +48,14 @@ import {
   starPowerHint,
   type StarPowerToolState,
 } from '@/lib/editor/starPowerTool';
-import { exportSong, saveChart, type ExportOptions } from '@/lib/client/api';
+import {
+  SaveConflictError,
+  exportSong,
+  fetchProject,
+  saveChart,
+  saveChartBeacon,
+  type ExportOptions,
+} from '@/lib/client/api';
 
 /**
  * Editor shell: owns chart state, playback wiring, autosave and keyboard shortcuts.
@@ -50,6 +68,7 @@ import { exportSong, saveChart, type ExportOptions } from '@/lib/client/api';
 const AUTOSAVE_DELAY_MS = 1500;
 
 export default function EditorShell({ initialProject }: { initialProject: Project }) {
+  const router = useRouter();
   const [state, dispatch] = useReducer(editorReducer, initialProject, createEditorState);
   const { project, selection, dirty } = state;
 
@@ -65,7 +84,7 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
   // Mirrors the clock for UI readouts only, updated at wavesurfer's own cadence
   // rather than per frame.
   const [displayTime, setDisplayTime] = useState(0);
-  const [duration, setDuration] = useState(project.audio.durationMs / 1000);
+  const [audioDuration, setAudioDuration] = useState(project.audio.durationMs / 1000);
 
   const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -73,8 +92,12 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
   const [reimportOpen, setReimportOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<'song' | 'sync' | 'sections' | 'check'>('sections');
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [starPowerTool, setStarPowerTool] = useState<StarPowerToolState>(STAR_POWER_TOOL_OFF);
   const clipboardRef = useRef<ClipboardBlock | null>(null);
+  /** Server revision this editor is based on — see save(). */
+  const revisionRef = useRef(initialProject.revision ?? 0);
+  const [conflict, setConflict] = useState(false);
   const [clipboardLabel, setClipboardLabel] = useState<string | null>(null);
   const [message, setMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
 
@@ -84,7 +107,13 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
    * Playback clock. Written by wavesurfer events, read by the canvas render loop.
    * Deliberately a ref: this is the value that must not cause re-renders.
    */
-  const clockRef = useRef<PlaybackClock>({ audioTime: 0, wallClock: performance.now(), playing: false });
+  const clockRef = useRef<PlaybackClock>({
+    audioTime: 0,
+    wallClock: performance.now(),
+    playing: false,
+    rate: 1,
+    preRoll: false,
+  });
 
   const timing = useMemo(
     () => new TimingMap(project.sync.bpms, project.resolution, project.sync.timeSignatures),
@@ -93,46 +122,236 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
 
   // ---- playback wiring ---------------------------------------------------------
 
-  const handleTimeUpdate = useCallback((seconds: number, isPlaying: boolean) => {
-    clockRef.current = { audioTime: seconds, wallClock: performance.now(), playing: isPlaying };
-    setDisplayTime(seconds);
-    setPlaying(isPlaying);
+  /**
+   * CHART TIME vs AUDIO TIME.
+   *
+   * The editor works in chart seconds. The lead-in pushes the music later, so the audio
+   * file's own timeline sits `leadInSec` behind:
+   *
+   *     chartSeconds = audioSeconds + leadInSec
+   *
+   * Everything the user sees — the playhead, the highway, the readout — is chart time.
+   * Only calls into wavesurfer convert back.
+   */
+  const leadInSec = project.meta.leadingSilenceMs / 1000;
+  const leadInRef = useRef(leadInSec);
+  leadInRef.current = leadInSec;
+
+  const rateRef = useRef(playbackRate);
+  rateRef.current = playbackRate;
+
+  /**
+   * Timer that ends the lead-in.
+   *
+   * An <audio> element has no negative time, so the silence before the music cannot come
+   * from the file — it is run on the wall clock, and the audio is started when it
+   * elapses. `preRoll` on the clock marks that stretch so wavesurfer's own position
+   * updates (which would report 0 + leadIn) are ignored until the handover.
+   */
+  const preRollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelPreRoll = useCallback(() => {
+    if (preRollTimer.current !== null) {
+      clearTimeout(preRollTimer.current);
+      preRollTimer.current = null;
+    }
   }, []);
 
-  const handleSeek = useCallback((seconds: number) => {
-    const clamped = Math.max(0, seconds);
-    waveformRef.current?.seek(clamped);
-    // Update the clock immediately so the highway responds on the very next frame
-    // rather than waiting for wavesurfer's seek event to land.
+  const writeClock = useCallback((chartSeconds: number, playing: boolean, preRoll: boolean) => {
     clockRef.current = {
-      audioTime: clamped,
+      audioTime: chartSeconds,
       wallClock: performance.now(),
-      playing: clockRef.current.playing,
+      playing,
+      rate: rateRef.current,
+      preRoll,
     };
-    setDisplayTime(clamped);
+    setDisplayTime(chartSeconds);
+    setPlaying(playing);
   }, []);
 
-  const togglePlay = useCallback(() => waveformRef.current?.toggle(), []);
+  /** Schedule the handover from silence to audio, `chartSeconds` into the lead-in. */
+  const startPreRoll = useCallback(
+    (chartSeconds: number) => {
+      cancelPreRoll();
+      writeClock(chartSeconds, true, true);
+      // Wall-clock delay, so a slower playback rate stretches the silence to match.
+      const delayMs = ((leadInRef.current - chartSeconds) / rateRef.current) * 1000;
+      preRollTimer.current = setTimeout(() => {
+        preRollTimer.current = null;
+        if (!clockRef.current.playing) return;
+        waveformRef.current?.seek(0);
+        waveformRef.current?.play();
+        writeClock(leadInRef.current, true, false);
+      }, Math.max(0, delayMs));
+    },
+    [cancelPreRoll, writeClock],
+  );
+
+  /** Position updates from wavesurfer, in AUDIO seconds. */
+  const handleTimeUpdate = useCallback(
+    (audioSeconds: number, isPlaying: boolean) => {
+      /**
+       * Anywhere inside the lead-in, the audio element is parked at zero and its position
+       * says nothing about where the playhead is — taking it would snap the playhead
+       * forward to the end of the silence. That is true whether or not we are playing:
+       * seeking to chart time 0 while paused makes wavesurfer emit a `seeking` at audio 0,
+       * which would otherwise read as chart time `leadIn` and bounce the playhead to the
+       * first beat every time you pressed Home.
+       */
+      if (clockRef.current.preRoll) {
+        if (isPlaying !== clockRef.current.playing) {
+          clockRef.current = { ...clockRef.current, playing: isPlaying };
+          setPlaying(isPlaying);
+        }
+        return;
+      }
+      writeClock(audioSeconds + leadInRef.current, isPlaying, false);
+    },
+    [writeClock],
+  );
+
+  /** Seek to a CHART-time position. */
+  const handleSeek = useCallback(
+    (chartSeconds: number) => {
+      const clamped = Math.max(0, chartSeconds);
+      const wasPlaying = clockRef.current.playing;
+      cancelPreRoll();
+
+      if (clamped < leadInRef.current) {
+        // Inside the lead-in: the audio has nothing to play yet, so park it at the start.
+        waveformRef.current?.pause();
+        waveformRef.current?.seek(0);
+        if (wasPlaying) startPreRoll(clamped);
+        else writeClock(clamped, false, true);
+        return;
+      }
+
+      waveformRef.current?.seek(clamped - leadInRef.current);
+      if (wasPlaying) waveformRef.current?.play();
+      // Written synchronously so the highway responds on the very next frame rather than
+      // waiting for wavesurfer's seek event.
+      writeClock(clamped, wasPlaying, false);
+    },
+    [cancelPreRoll, startPreRoll, writeClock],
+  );
+
+  const togglePlay = useCallback(() => {
+    const chartNow = currentTime(clockRef.current);
+    if (clockRef.current.playing) {
+      cancelPreRoll();
+      waveformRef.current?.pause();
+      writeClock(chartNow, false, chartNow < leadInRef.current);
+      return;
+    }
+    if (chartNow < leadInRef.current) {
+      startPreRoll(chartNow);
+      return;
+    }
+    waveformRef.current?.play();
+    writeClock(chartNow, true, false);
+  }, [cancelPreRoll, startPreRoll, writeClock]);
+
+  useEffect(() => cancelPreRoll, [cancelPreRoll]);
+
+  /**
+   * Lead-in drag.
+   *
+   * Only the release enters undo history — a drag fires continuously, and one undo step
+   * per pixel would bury everything else in the stack. Intermediate values still update
+   * the project so the waveform and highway track the drag live.
+   */
+  const handleLeadInChange = useCallback(
+    (ms: number, committed: boolean) => {
+      dispatch({ type: 'setMeta', meta: { leadingSilenceMs: ms }, transient: !committed });
+      if (committed) {
+        setMessage({
+          kind: 'info',
+          text:
+            ms > 0
+              ? `${(ms / 1000).toFixed(2)}s of silence before the song. The export includes it.`
+              : 'Lead-in removed.',
+        });
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     waveformRef.current?.setPlaybackRate(playbackRate);
-  }, [playbackRate]);
+    // Re-anchor: the clock's elapsed-time maths is scaled by the rate, so a rate change
+    // has to reset the anchor or the frames since the last reading are counted at the
+    // wrong speed.
+    const clock = clockRef.current;
+    clockRef.current = {
+      ...clock,
+      audioTime: currentTime(clock),
+      wallClock: performance.now(),
+      rate: playbackRate,
+    };
+    // A pending lead-in was timed at the old rate.
+    if (clock.playing && clock.preRoll) startPreRoll(currentTime(clock));
+  }, [playbackRate, startPreRoll]);
 
   // ---- saving ------------------------------------------------------------------
 
   const projectRef = useRef(project);
-  projectRef.current = project;
+  projectRef.current = { ...project, revision: revisionRef.current };
 
+  /**
+   * Save, and take the server's revision back.
+   *
+   * The revision is what makes concurrent editing safe: the next save carries it, and the
+   * server refuses anything built on a stale copy. Without it, two people on one song
+   * overwrite each other silently.
+   */
   const save = useCallback(async () => {
     setSaving(true);
     try {
-      await saveChart(projectRef.current.id, projectRef.current);
+      const stored = await saveChart(projectRef.current.id, projectRef.current);
+      revisionRef.current = stored.revision ?? 0;
+      dispatch({ type: 'setMeta', meta: {}, transient: true });
       dispatch({ type: 'markSaved' });
+      setConflict(false);
       setMessage(null);
+      return true;
     } catch (error) {
-      setMessage({ kind: 'error', text: `Save failed: ${(error as Error).message}` });
+      if (error instanceof SaveConflictError) {
+        setConflict(true);
+        setMessage({ kind: 'error', text: error.message });
+      } else {
+        setMessage({ kind: 'error', text: `Save failed: ${(error as Error).message}` });
+      }
+      return false;
     } finally {
       setSaving(false);
+    }
+  }, []);
+
+  /** Discard local edits and take whatever is on the server. */
+  const reloadFromServer = useCallback(async () => {
+    try {
+      const fresh = await fetchProject(projectRef.current.id);
+      revisionRef.current = fresh.revision ?? 0;
+      dispatch({ type: 'reset', project: fresh });
+      setConflict(false);
+      setMessage({ kind: 'info', text: 'Reloaded the version from the server.' });
+    } catch (error) {
+      setMessage({ kind: 'error', text: `Could not reload: ${(error as Error).message}` });
+    }
+  }, []);
+
+  /** Overwrite the server's version with this one, deliberately. */
+  const overwriteServer = useCallback(async () => {
+    try {
+      const fresh = await fetchProject(projectRef.current.id);
+      revisionRef.current = fresh.revision ?? 0;
+      const forced = { ...projectRef.current, revision: revisionRef.current };
+      const stored = await saveChart(forced.id, forced);
+      revisionRef.current = stored.revision ?? 0;
+      dispatch({ type: 'markSaved' });
+      setConflict(false);
+      setMessage({ kind: 'info', text: 'Your version was saved over the other one.' });
+    } catch (error) {
+      setMessage({ kind: 'error', text: `Could not overwrite: ${(error as Error).message}` });
     }
   }, []);
 
@@ -144,16 +363,40 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
     return () => clearTimeout(timer);
   }, [dirty, project, save]);
 
-  // Last line of defence against losing work to a closed tab mid-debounce.
+  /**
+   * Losing work on the way out.
+   *
+   * `beforeunload` covers closing the tab, but NOT in-app navigation — clicking
+   * "← Songs" is a client-side route change, so an edit made inside the autosave debounce
+   * used to vanish with no warning. `pagehide` plus `sendBeacon` covers the cases
+   * `beforeunload` misses entirely (a closed lid, a tab evicted on mobile), because a
+   * normal fetch is cancelled the moment the document goes away.
+   */
   useEffect(() => {
     if (!dirty) return;
     const warn = (event: BeforeUnloadEvent) => {
       event.preventDefault();
       event.returnValue = '';
     };
+    const flush = () => {
+      saveChartBeacon(projectRef.current.id, projectRef.current);
+    };
     window.addEventListener('beforeunload', warn);
-    return () => window.removeEventListener('beforeunload', warn);
+    window.addEventListener('pagehide', flush);
+    return () => {
+      window.removeEventListener('beforeunload', warn);
+      window.removeEventListener('pagehide', flush);
+    };
   }, [dirty]);
+
+  /** Save any pending edit, then navigate. Used by the back link. */
+  const leaveTo = useCallback(
+    async (href: string) => {
+      if (dirty) await save();
+      router.push(href);
+    },
+    [dirty, save, router],
+  );
 
   // ---- export ------------------------------------------------------------------
 
@@ -290,6 +533,63 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
     });
   }, [difficulty, trackName, project.tracks, project.resolution]);
 
+  // ---- live keyboard entry -------------------------------------------------------
+
+  const liveEntryRef = useRef(createLiveEntryState());
+
+  /**
+   * The playhead RIGHT NOW, as a snapped tick.
+   *
+   * Read from the clock rather than from React state: `displayTime` only refreshes when
+   * the audio element reports in, roughly four times a second, and a note placed a
+   * quarter of a second behind where you heard it is worse than useless.
+   */
+  const liveTick = useCallback(() => {
+    const chartSeconds = currentTime(clockRef.current);
+    return snapTick(
+      Math.max(0, timing.secToTick(chartSeconds)),
+      project.resolution,
+      snap,
+      timing,
+    );
+  }, [timing, project.resolution, snap]);
+
+  const placeLiveNote = useCallback(
+    (key: string, lane: Lane, forced: boolean) => {
+      const tick = liveTick();
+      const id = newNoteId();
+      dispatch({ type: 'addNote', track: trackName, tick, lane, forced, id });
+      registerHeld(liveEntryRef.current, key, { id, lane, startTick: tick });
+    },
+    [liveTick, trackName],
+  );
+
+  /** Extend the selection's sustains to just before the next note on each lane. */
+  const handleSustainToNext = useCallback(() => {
+    const notes = project.tracks[trackName].notes;
+    const changes = sustainSelectionToNext(selectedNotes, notes, {
+      resolution: project.resolution,
+    });
+    if (changes.length === 0) {
+      setMessage({ kind: 'error', text: 'Nothing to extend — no room before the next note.' });
+      return;
+    }
+    dispatch({ type: 'setNoteLengths', track: trackName, changes });
+  }, [project.tracks, project.resolution, trackName, selectedNotes]);
+
+  /** Same, for one note — what double-clicking a note on the highway does. */
+  const handleSustainNote = useCallback(
+    (id: string) => {
+      const notes = project.tracks[trackName].notes;
+      const note = notes.find((n) => n.id === id);
+      if (!note) return;
+      const length = sustainToNext(note, notes, { resolution: project.resolution });
+      if (length === note.length) return;
+      dispatch({ type: 'setNoteLengths', track: trackName, changes: [{ id, length }] });
+    },
+    [project.tracks, project.resolution, trackName],
+  );
+
   const moveFret = useCallback(
     (delta: number) => {
       if (selection.size === 0) return;
@@ -420,17 +720,76 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
       }
       if (mod) return;
 
-      // Alt + arrows move the selection across frets. Alt rather than bare arrows so
-      // the arrow keys stay free for scrubbing, and so a stray keypress cannot silently
-      // rearrange a chart.
-      if (event.altKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+      /**
+       * ALT IS TOOLS.
+       *
+       * Bare letters now belong to note entry (A-G) and bare Space places an open note,
+       * so every editor action that used to sit on a bare letter moved onto Alt. That
+       * keeps the two sets from ever colliding: if you are playing along, nothing you
+       * press can silently retag your selection.
+       */
+      if (event.altKey) {
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+          event.preventDefault();
+          moveFret(event.key === 'ArrowRight' ? 1 : -1);
+          return;
+        }
+        const withSelection = (run: () => void) => {
+          event.preventDefault();
+          if (selection.size > 0) run();
+          else setMessage({ kind: 'error', text: 'Select some notes first.' });
+        };
+        switch (event.key.toLowerCase()) {
+          case 'h':
+            withSelection(() =>
+              dispatch({ type: 'toggleFlag', track: trackName, ids: [...selection], flag: 'forced' }),
+            );
+            return;
+          case 't':
+            withSelection(() =>
+              dispatch({ type: 'toggleFlag', track: trackName, ids: [...selection], flag: 'tap' }),
+            );
+            return;
+          case 'o':
+            withSelection(() =>
+              dispatch({ type: 'setNotesLane', track: trackName, ids: [...selection], lane: 7 }),
+            );
+            return;
+          case 's':
+            withSelection(() => {
+              for (const note of selectedNotes) {
+                dispatch({ type: 'setNoteLength', track: trackName, id: note.id, length: 0 });
+              }
+            });
+            return;
+          case 'e':
+            withSelection(handleSustainToNext);
+            return;
+          case 'p':
+            event.preventDefault();
+            toggleStarPowerTool();
+            return;
+          default:
+            return;
+        }
+      }
+
+      // ---- live note entry ----------------------------------------------------------
+      // A S D F G and Space place notes at the playhead as the song plays. Handled
+      // before the switch below so nothing else can claim those keys.
+      if (isEntryKey(event.key)) {
         event.preventDefault();
-        moveFret(event.key === 'ArrowRight' ? 1 : -1);
+        const { place } = pressKey(liveEntryRef.current, event.key, {
+          repeat: event.repeat,
+          shift: event.shiftKey,
+        });
+        if (place) placeLiveNote(event.key, place.lane, place.forced);
         return;
       }
 
       switch (event.key) {
-        case ' ':
+        case 'Enter':
+          // Play/pause moved here when Space became the open note.
           event.preventDefault();
           togglePlay();
           break;
@@ -451,8 +810,8 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
           event.preventDefault();
           handleSeek(0);
           break;
-        // 1-5 place a note in that lane at the playhead — the fastest way to chart
-        // while listening, and how charters expect a keyboard workflow to behave.
+        // 1-5 and 0 still place a note at the playhead, for anyone who learned them
+        // before A-G existed. Both schemes can coexist; the digits are not entry keys.
         case '1':
         case '2':
         case '3':
@@ -467,26 +826,31 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
           event.preventDefault();
           dispatch({ type: 'addNote', track: trackName, tick: playheadTick, lane: 7 });
           break;
-        case 'f':
-          if (selection.size > 0) {
-            dispatch({ type: 'toggleFlag', track: trackName, ids: [...selection], flag: 'forced' });
-          }
-          break;
-        case 't':
-          if (selection.size > 0) {
-            dispatch({ type: 'toggleFlag', track: trackName, ids: [...selection], flag: 'tap' });
-          }
-          break;
-        case 'p':
-          toggleStarPowerTool();
-          break;
         default:
           break;
       }
     };
 
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (!isEntryKey(event.key)) return;
+      const { note, length } = releaseKey(
+        liveEntryRef.current,
+        event.key,
+        liveTick(),
+        // Below an eighth note a hold is a tap, not a sustain — see releaseKey.
+        project.resolution / 2,
+      );
+      if (note && length > 0) {
+        dispatch({ type: 'setNoteLength', track: trackName, id: note.id, length });
+      }
+    };
+
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+    };
   }, [
     selection,
     trackName,
@@ -505,9 +869,18 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
   return (
     <div className="flex h-full flex-col overflow-hidden">
       <header className="flex items-center gap-4 border-b border-edge px-4 py-2">
-        <Link href="/" className="text-2xs uppercase tracking-widest text-faint hover:text-fg">
+        {/*
+          A button, not a Link: leaving flushes the pending autosave first. A client-side
+          route change does not fire beforeunload, so an edit made inside the debounce
+          used to disappear on the way out.
+        */}
+        <button
+          type="button"
+          onClick={() => void leaveTo('/')}
+          className="text-2xs uppercase tracking-widest text-faint hover:text-fg"
+        >
           ← Songs
-        </Link>
+        </button>
         <div className="min-w-0">
           <h1 className="truncate text-sm text-fg">{project.meta.name || 'Untitled'}</h1>
           <p className="truncate text-2xs uppercase tracking-widest text-faint">
@@ -525,10 +898,31 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
         )}
       </header>
 
+      {/*
+        A save clash is the one error that must not scroll past in a status line: someone
+        else's work is at stake either way, so it blocks until a human chooses.
+      */}
+      {conflict && (
+        <div className="flex flex-wrap items-center gap-3 border-b border-edge bg-panel2 px-4 py-2">
+          <p className="text-2xs text-lane-orange">
+            Someone else saved this song while you had it open. Your edits are still here,
+            unsaved.
+          </p>
+          <div className="ml-auto flex gap-2">
+            <button type="button" className="ch-button" onClick={() => void reloadFromServer()}>
+              Discard mine, load theirs
+            </button>
+            <button type="button" className="ch-button" onClick={() => void overwriteServer()}>
+              Keep mine, overwrite theirs
+            </button>
+          </div>
+        </div>
+      )}
+
       <TransportBar
         playing={playing}
         currentSeconds={displayTime}
-        durationSeconds={duration}
+        durationSeconds={audioDuration + leadInSec}
         snap={snap}
         onSnapChange={setSnap}
         zoom={highwayZoom}
@@ -553,9 +947,11 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
         audioUrl={audioUrl}
         handleRef={waveformRef}
         onTimeUpdate={handleTimeUpdate}
-        onReady={setDuration}
+        onReady={setAudioDuration}
         onError={(text) => setMessage({ kind: 'error', text })}
         zoom={waveZoom}
+        leadingSilenceMs={project.meta.leadingSilenceMs}
+        onLeadingSilenceChange={handleLeadInChange}
       />
 
       <div className="flex items-center gap-4 border-b border-edge bg-panel px-4">
@@ -631,6 +1027,7 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
           }
         }}
         onDelete={() => dispatch({ type: 'deleteNotes', track: trackName, ids: [...selection] })}
+        onSustain={handleSustainToNext}
         onCopy={handleCopy}
         onPaste={handlePaste}
         clipboardLabel={clipboardLabel}
@@ -640,7 +1037,7 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
       />
 
       <div className="flex min-h-0 flex-1">
-        <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 flex-1 flex-col">
           <NoteHighway
             project={project}
             trackName={trackName}
@@ -653,10 +1050,27 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
             onSeek={handleSeek}
             starPowerTool={starPowerTool}
             onStarPowerClick={handleStarPowerClick}
+            onSustainNote={handleSustainNote}
           />
+          <KeyLegend />
         </div>
 
-        <aside className="flex w-72 shrink-0 flex-col border-l border-edge bg-panel">
+        {/*
+          The panel is a reference surface, not something you look at while placing notes,
+          so it folds away and hands its width to the highway.
+        */}
+        <button
+          type="button"
+          onClick={() => setSidebarOpen((v) => !v)}
+          title={sidebarOpen ? 'Hide the panel' : 'Show the panel'}
+          className="w-4 shrink-0 border-l border-edge bg-panel text-2xs text-faint hover:text-fg"
+        >
+          {sidebarOpen ? '›' : '‹'}
+        </button>
+
+        <aside
+          className={`${sidebarOpen ? 'flex w-72' : 'hidden'} shrink-0 flex-col border-l border-edge bg-panel`}
+        >
           <nav className="flex shrink-0 border-b border-edge">
             {(['sections', 'song', 'sync', 'check'] as const).map((tab) => (
               <button
@@ -742,13 +1156,14 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
         project={project}
         open={reimportOpen}
         onClose={() => setReimportOpen(false)}
-        onApplied={(updated) => {
+        onApplied={(updated, note) => {
           // The server has already written this, so reset rather than marking dirty —
           // otherwise the autosave would immediately write it straight back.
+          revisionRef.current = updated.revision ?? 0;
           dispatch({ type: 'reset', project: updated });
           setMessage({
             kind: 'info',
-            text: `Re-imported: ${updated.tracks.ExpertSingle.notes.length} Expert notes.`,
+            text: note ?? `Re-imported: ${updated.tracks.ExpertSingle.notes.length} Expert notes.`,
           });
         }}
       />

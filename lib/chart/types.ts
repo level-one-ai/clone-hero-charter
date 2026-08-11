@@ -132,13 +132,15 @@ export interface SongMeta {
    * get your bearings, and the first notes are hard to line up. Adding a lead-in
    * shifts the whole song later without touching a single note.
    *
-   * Non-destructive. The uploaded audio on disk is never modified; the export prepends
-   * real silence with ffmpeg and raises `offset` by the same amount, so every note
-   * still lands on exactly the music it was charted against — the lead-in is added in
-   * front of the song rather than sliding the chart around inside it. The editor
-   * therefore needs no change at all: what you hear against the highway is what the
-   * game plays. midi-ch has the same setting but leaves padding the audio to you in a
-   * DAW; doing it here keeps chart and audio in step automatically.
+   * THE MUSIC MOVES, THE NOTES STAY PUT. Tick 0 is the start of the silence, so the
+   * highway gains empty space before the first beat — which is the whole point when a
+   * song starts too fast to chart its opening. `offset` is deliberately NOT adjusted:
+   * the export prepends real silence with ffmpeg, so the padded file's timeline already
+   * IS chart time, and adding the lead-in to offset as well would cancel the pad out.
+   *
+   * Non-destructive: the uploaded audio on disk is never modified. The editor previews
+   * it by running a silent pre-roll before handing over to the audio element, so what
+   * you hear against the highway is what the game plays.
    */
   leadingSilenceMs: number;
 }
@@ -153,6 +155,15 @@ export interface AudioInfo {
 export interface Project {
   version: 1;
   id: string;
+  /**
+   * Bumped by the server on every write, and never by the client.
+   *
+   * This is what stops two people — or two tabs — silently overwriting each other. A
+   * save carries the revision it was based on; if the stored one has moved past it, the
+   * server refuses rather than accepting a write built on a stale copy. Optional so
+   * projects saved before it existed still load.
+   */
+  revision?: number;
   meta: SongMeta;
   resolution: number;
   audio: AudioInfo;
@@ -208,6 +219,7 @@ export function createEmptyProject(id: string, meta: Partial<SongMeta> = {}): Pr
   return {
     version: 1,
     id,
+    revision: 0,
     meta: {
       name: '',
       artist: '',

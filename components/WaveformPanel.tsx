@@ -34,7 +34,18 @@ interface Props {
   onError: (message: string) => void;
   /** Horizontal zoom in pixels per second. */
   zoom: number;
+  /** Silence before the music starts, in milliseconds. */
+  leadingSilenceMs: number;
+  /** Called as the lead-in grip is dragged, and once more when it is released. */
+  onLeadingSilenceChange: (ms: number, committed: boolean) => void;
 }
+
+/**
+ * Widest the lead-in gutter is allowed to grow on screen. Past this the waveform would
+ * be pushed off the right-hand side; the gutter stops growing and reports the value
+ * numerically instead.
+ */
+const MAX_GUTTER_PX = 320;
 
 export default function WaveformPanel({
   audioUrl,
@@ -43,10 +54,13 @@ export default function WaveformPanel({
   onReady,
   onError,
   zoom,
+  leadingSilenceMs,
+  onLeadingSilenceChange,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const waveRef = useRef<WaveSurfer | null>(null);
   const [loading, setLoading] = useState(true);
+  const [dragging, setDragging] = useState(false);
 
   // Callbacks are mirrored into refs so changing them never tears down the
   // wavesurfer instance — re-decoding a 50 MB WAV on every parent render would be
@@ -60,7 +74,9 @@ export default function WaveformPanel({
 
     const wavesurfer = WaveSurfer.create({
       container,
-      height: 96,
+      // Deliberately short: the waveform is for navigation, and every pixel it gives
+      // back goes to the highway, which is what you actually chart on.
+      height: 56,
       // Monochrome to match the chrome; the lane colours belong to the highway alone.
       // Kept bright enough to read against #121212 — the waveform is a primary
       // navigation surface, so low contrast here makes the tool hard to use.
@@ -142,9 +158,73 @@ export default function WaveformPanel({
     [],
   );
 
+  /**
+   * The lead-in, drawn to scale.
+   *
+   * Dragging the grip pushes the audio to the right, which is exactly what the lead-in
+   * does to the song: the music starts later and the highway gains empty space before
+   * the first beat. Width comes from the same pixels-per-second as the zoom, so what you
+   * drag out is the silence you get.
+   */
+  const gutterPx = Math.min(MAX_GUTTER_PX, (leadingSilenceMs / 1000) * zoom);
+  const clamped = gutterPx >= MAX_GUTTER_PX && leadingSilenceMs > 0;
+
+  const startDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startMs = leadingSilenceMs;
+    const target = event.currentTarget;
+    target.setPointerCapture(event.pointerId);
+    setDragging(true);
+
+    const move = (moveEvent: PointerEvent) => {
+      const deltaMs = ((moveEvent.clientX - startX) / zoom) * 1000;
+      onLeadingSilenceChange(clampMs(startMs + deltaMs), false);
+    };
+    const end = (endEvent: PointerEvent) => {
+      const deltaMs = ((endEvent.clientX - startX) / zoom) * 1000;
+      onLeadingSilenceChange(clampMs(startMs + deltaMs), true);
+      setDragging(false);
+      target.releasePointerCapture(endEvent.pointerId);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', end);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', end);
+  };
+
   return (
-    <div className="relative border-b border-edge bg-panel">
-      <div ref={containerRef} className="px-2 py-2" />
+    <div className="relative flex items-stretch overflow-hidden border-b border-edge bg-panel">
+      {/* Lead-in: the silence before the music, to scale. */}
+      <div
+        className="relative shrink-0 border-r border-edge2"
+        style={{ width: gutterPx, background: 'repeating-linear-gradient(135deg, #1a1a1a 0 6px, #141414 6px 12px)' }}
+      >
+        {gutterPx > 46 && (
+          <span className="pointer-events-none absolute inset-0 flex items-center justify-center font-mono text-2xs text-faint">
+            {(leadingSilenceMs / 1000).toFixed(2)}s{clamped ? '+' : ''}
+          </span>
+        )}
+      </div>
+
+      {/*
+        The grip. Always present, even at zero lead-in, so the feature is discoverable —
+        an affordance that only appears once you already know about it is no affordance.
+      */}
+      <div
+        onPointerDown={startDrag}
+        title="Drag right to add silence before the song starts"
+        className={`z-10 flex w-2 shrink-0 cursor-ew-resize items-center justify-center ${
+          dragging ? 'bg-fg' : 'bg-edge2 hover:bg-muted'
+        }`}
+      >
+        <span className="pointer-events-none text-2xs leading-none text-bg">⋮</span>
+      </div>
+
+      <div className="min-w-0 flex-1">
+        <div ref={containerRef} className="px-2 py-1" />
+      </div>
+
       {loading && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <span className="text-2xs uppercase tracking-widest text-faint">Decoding audio…</span>
@@ -152,4 +232,9 @@ export default function WaveformPanel({
       )}
     </div>
   );
+}
+
+/** Lead-in bounds: never negative, and 60s is far past any musical use. */
+function clampMs(ms: number): number {
+  return Math.max(0, Math.min(60_000, Math.round(ms)));
 }

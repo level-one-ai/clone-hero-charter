@@ -5,6 +5,7 @@ import type { Project } from '@/lib/chart/types';
 import {
   analyzeReimport,
   applyReimport,
+  mergeMidiFiles,
   type MelodyOptions,
   type ReimportAnalysis,
   type ReimportMode,
@@ -25,7 +26,7 @@ interface Props {
   project: Project;
   open: boolean;
   onClose: () => void;
-  onApplied: (project: Project) => void;
+  onApplied: (project: Project, message?: string) => void;
 }
 
 const OCTAVE_OPTIONS = [
@@ -42,6 +43,33 @@ export default function ReimportDialog({ project, open, onClose, onApplied }: Pr
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [trackIndex, setTrackIndex] = useState<number | null>(null);
+  const [merging, setMerging] = useState(false);
+
+  /**
+   * Merge extra files into the gaps.
+   *
+   * Not undoable through the editor's history — the server writes the merged chart
+   * directly — so the result is reported precisely enough to judge: how many notes went
+   * in, how many were skipped as already charted, and which track each file contributed.
+   */
+  const handleMerge = async (files: File[]) => {
+    setMerging(true);
+    try {
+      const result = await mergeMidiFiles(project.id, files);
+      const detail = result.perFile
+        .map((f: { name: string; added: number; track: string }) => `${f.name}: +${f.added} from "${f.track}"`)
+        .join(', ');
+      onApplied(
+        result.project,
+        `Merged ${result.added} note${result.added === 1 ? '' : 's'} into the gaps (${result.skipped} skipped as already charted). ${detail}`,
+      );
+      onClose();
+    } catch (error) {
+      setError((error as Error).message);
+    } finally {
+      setMerging(false);
+    }
+  };
   const [octaveOffset, setOctaveOffset] = useState(0);
   const [mode, setMode] = useState<ReimportMode>('auto');
   const [melody, setMelody] = useState<MelodyOptions>({
@@ -403,7 +431,30 @@ export default function ReimportDialog({ project, open, onClose, onApplied }: Pr
               </div>
             </div>
           ) : (
-            <div className="flex justify-end gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {/*
+                Merging is the non-destructive sibling of re-importing: extra files fill
+                the gaps and nothing already charted is touched. It sits here because
+                this is where you come when the import did not cover the whole song.
+              */}
+              <label className="mr-auto flex items-center gap-2">
+                <span className="ch-button cursor-pointer">
+                  {merging ? 'Merging…' : 'Merge extra files…'}
+                  <input
+                    type="file"
+                    multiple
+                    accept=".mid,.midi,.gp3,.gp4,.gp5,.gpx,.gp"
+                    className="hidden"
+                    disabled={merging}
+                    onChange={(event) => {
+                      const files = [...(event.target.files ?? [])];
+                      event.target.value = '';
+                      if (files.length > 0) void handleMerge(files);
+                    }}
+                  />
+                </span>
+                <span className="text-2xs text-faint">Fills gaps only</span>
+              </label>
               <button type="button" className="ch-button" onClick={onClose}>
                 Cancel
               </button>

@@ -63,6 +63,9 @@ const timeSignatureSchema = z.object({
 export const projectSchema = z.object({
   version: z.literal(1),
   id: z.string().min(1).max(64),
+  // Client-supplied revisions are advisory only: the route compares them and the server
+  // owns the value it stores, so a forged one cannot do anything but fail the check.
+  revision: z.number().int().min(0).optional(),
   meta: z.object({
     name: z.string().max(300),
     artist: z.string().max(300),
