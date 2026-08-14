@@ -267,8 +267,8 @@ function drawHighway(
   }
 
   // Fret buttons sit under the gems so a note crossing the line reads as landing ON
-  // the button, exactly as it does in game.
-  drawFretButtons(ctx, originX, strikeY);
+  // the button, exactly as it does in game — and they light as each note arrives.
+  drawFretButtons(ctx, originX, strikeY, laneGlow(renderNotes, timing, timeSeconds));
   drawStrikeLine(ctx, originX, highwayWidth, strikeY);
   drawNoteHeads(ctx, renderNotes, originX, tickToYLocal, timing, timeSeconds);
 
@@ -626,31 +626,105 @@ function drawSyncMarkers(
  * spreadsheet grid, and it gives the eye a fixed colour reference for which lane is
  * which without needing to read the labels.
  */
+/**
+ * How long a fret button stays lit after a note lands on it, in seconds.
+ *
+ * Long enough to register at a glance, short enough that a fast run still reads as
+ * separate hits rather than one continuous glow.
+ */
+const GLOW_DECAY_SEC = 0.18;
+/** Lit slightly BEFORE the note lands, so the flash reads as anticipation, not lag. */
+const GLOW_LEAD_SEC = 0.03;
+
+/**
+ * Per-lane glow, 0-1, for the fret buttons.
+ *
+ * Stateless: intensity is derived from how far the playhead is from each note rather than
+ * from a decaying value carried between frames. That means it is correct when scrubbing
+ * backwards, when paused, and at any playback rate — a stored decay would need resetting
+ * on every seek and would be wrong at 0.25×.
+ *
+ * A sustain keeps its lane lit for its whole length, exactly as the game holds the button
+ * down.
+ */
+export function laneGlow(
+  notes: RenderNote[],
+  timing: TimingMap,
+  timeSeconds: number,
+): number[] {
+  const glow = [0, 0, 0, 0, 0];
+
+  for (const item of notes) {
+    const start = timing.tickToSec(item.tick);
+    const end = item.length > 0 ? timing.tickToSec(item.tick + item.length) : start;
+
+    let intensity = 0;
+    if (timeSeconds >= start - GLOW_LEAD_SEC && timeSeconds <= end) {
+      intensity = 1; // on the note, or held through its sustain
+    } else if (timeSeconds > end && timeSeconds - end < GLOW_DECAY_SEC) {
+      intensity = 1 - (timeSeconds - end) / GLOW_DECAY_SEC;
+    }
+    if (intensity <= 0) continue;
+
+    // An open note is the whole fretboard, so every button lights — but dimmer, because
+    // no single fret is being pressed.
+    if (item.lane === 7) {
+      for (let lane = 0; lane < 5; lane += 1) {
+        glow[lane] = Math.max(glow[lane], intensity * 0.7);
+      }
+    } else if (item.lane >= 0 && item.lane <= 4) {
+      glow[item.lane] = Math.max(glow[item.lane], intensity);
+    }
+  }
+
+  return glow;
+}
+
+/**
+ * The five fret buttons at the strike line.
+ *
+ * Drawn with the SAME silhouette as a note gem rather than as rings: a note landing on
+ * its button should look like the note arriving home, which is what makes Clone Hero
+ * readable at speed. They light in their lane colour as each note crosses.
+ */
 function drawFretButtons(
   ctx: CanvasRenderingContext2D,
   originX: number,
   strikeY: number,
+  glow: number[],
 ): void {
-  const radius = 15;
+  const w = HIGHWAY.laneWidth - 18;
+  const h = HIGHWAY.noteHeight;
+
   for (let lane = 0; lane < 5; lane += 1) {
     const centerX = originX + lane * HIGHWAY.laneWidth + HIGHWAY.laneWidth / 2;
     const color = LANE_COLORS[lane];
+    const lit = glow[lane] ?? 0;
 
-    ctx.beginPath();
-    ctx.arc(centerX, strikeY, radius, 0, Math.PI * 2);
-    ctx.fillStyle = withAlpha(color, 0.16);
+    const x = centerX - w / 2;
+    const top = strikeY - h / 2;
+
+    // Body: dark when idle so gems landing on it stay legible, flooding with the lane
+    // colour as it lights.
+    roundRect(ctx, x, top, w, h, 5);
+    ctx.fillStyle = lit > 0 ? withAlpha(color, 0.18 + lit * 0.72) : 'rgba(10, 10, 10, 0.55)';
     ctx.fill();
 
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = withAlpha(color, 0.85);
+    ctx.lineWidth = lit > 0 ? 2 + lit : 2;
+    ctx.strokeStyle = withAlpha(color, 0.5 + lit * 0.5);
     ctx.stroke();
 
-    // Inner well, so the button reads as a ring rather than a filled disc that would
-    // compete with the note gems landing on it.
-    ctx.beginPath();
-    ctx.arc(centerX, strikeY, radius - 5, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(10, 10, 10, 0.55)';
-    ctx.fill();
+    // A struck button throws light onto the highway around it, the way the game does.
+    if (lit > 0.05) {
+      ctx.save();
+      ctx.globalAlpha = lit * 0.5;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 16 * lit;
+      roundRect(ctx, x, top, w, h, 5);
+      ctx.strokeStyle = withAlpha(color, 0.9);
+      ctx.stroke();
+      ctx.restore();
+    }
   }
   ctx.lineWidth = 1;
 }
@@ -993,6 +1067,14 @@ export function laneToX(lane: number, ctx: HitTestContext): number {
 /** How close to a sustain's end counts as grabbing the resize handle, in pixels. */
 export const SUSTAIN_HANDLE_PX = 10;
 
+/**
+ * Band at the top of a note head that starts a sustain drag, in pixels.
+ *
+ * Kept to a third of the head so the rest of it still selects and drags the note — the
+ * common action must stay the easy one.
+ */
+export const SUSTAIN_GRAB_PX = 7;
+
 export interface HitResult {
   note: Note;
   /** True when the pointer is on the tail end, i.e. a sustain drag rather than a move. */
@@ -1016,24 +1098,31 @@ export function hitTestNote(
     const noteY = tickToY(note.tick, ctx);
     const halfHeight = HIGHWAY.noteHeight / 2 + 3;
 
-    if (note.lane === 7) {
-      const originX = (ctx.cssWidth - HIGHWAY.width) / 2;
-      const withinX = x >= originX && x <= originX + HIGHWAY.width;
-      if (withinX && Math.abs(y - noteY) <= halfHeight) {
-        return { note, onSustainHandle: false };
+    const originX = (ctx.cssWidth - HIGHWAY.width) / 2;
+    const centerX = note.lane === 7 ? ctx.cssWidth / 2 : laneToX(note.lane, ctx);
+    const withinHeadX =
+      note.lane === 7
+        ? x >= originX && x <= originX + HIGHWAY.width
+        : Math.abs(x - centerX) <= (HIGHWAY.laneWidth - 18) / 2 + 4;
+
+    if (withinHeadX && Math.abs(y - noteY) <= halfHeight) {
+      /**
+       * The TOP edge of the head starts a sustain, on any note.
+       *
+       * Ticks grow upward, so a sustain extends up from the head — which means the top
+       * edge is where you would instinctively pull it from. Without this a note with no
+       * sustain had nothing to grab at all: the only handle was the end of a tail that
+       * did not exist yet, so sustains could only be lengthened, never started.
+       */
+      if (y <= noteY - halfHeight + SUSTAIN_GRAB_PX) {
+        return { note, onSustainHandle: true };
       }
-    } else {
-      const centerX = laneToX(note.lane, ctx);
-      const withinX = Math.abs(x - centerX) <= (HIGHWAY.laneWidth - 18) / 2 + 4;
-      if (withinX && Math.abs(y - noteY) <= halfHeight) {
-        return { note, onSustainHandle: false };
-      }
+      return { note, onSustainHandle: false };
     }
 
     // Sustain tail: grabbing near its far end resizes instead of moving.
     if (note.length > 0) {
       const tailY = tickToY(note.tick + note.length, ctx);
-      const centerX = note.lane === 7 ? ctx.cssWidth / 2 : laneToX(note.lane, ctx);
       const withinX =
         note.lane === 7
           ? Math.abs(x - centerX) <= HIGHWAY.width / 2

@@ -25,6 +25,8 @@ interface Props {
   playheadTick: number;
   dispatch: React.Dispatch<EditorAction>;
   onSeekToTick: (tick: number) => void;
+  /** Select every note between two ticks — used to grab a whole named section. */
+  onSelectSection: (fromTick: number, toTick: number, label: string) => void;
 }
 
 /** `section Intro` in the chart; the panel shows and edits just the name. */
@@ -37,12 +39,26 @@ export default function SectionsPanel({
   playheadTick,
   dispatch,
   onSeekToTick,
+  onSelectSection,
 }: Props) {
   const [name, setName] = useState('');
 
+  /**
+   * Sections, each paired with where it ends.
+   *
+   * A section marker only records where it STARTS; its extent is "until the next one",
+   * which is what makes selecting one possible at all. The last section runs to the end
+   * of the chart, so `endTick` is Infinity there and the range selection simply takes
+   * everything after it.
+   */
   const sections = project.events
     .filter((event) => event.text.startsWith(SECTION_PREFIX))
-    .map((event) => ({ tick: event.tick, name: event.text.slice(SECTION_PREFIX.length) }));
+    .map((event) => ({ tick: event.tick, name: event.text.slice(SECTION_PREFIX.length) }))
+    .sort((a, b) => a.tick - b.tick)
+    .map((section, index, all) => ({
+      ...section,
+      endTick: index + 1 < all.length ? all[index + 1].tick - 1 : Number.MAX_SAFE_INTEGER,
+    }));
 
   const otherEvents = project.events.filter((event) => !event.text.startsWith(SECTION_PREFIX));
   const starPower = project.tracks[trackName].starPower;
@@ -115,9 +131,22 @@ export default function SectionsPanel({
                 type="button"
                 className="min-w-0 flex-1 truncate text-left text-muted hover:text-fg"
                 onClick={() => onSeekToTick(section.tick)}
+                title="Jump to this section"
               >
                 <span className="font-mono">{formatTime(timing.tickToSec(section.tick))}</span>{' '}
                 {section.name}
+              </button>
+              {/*
+                Selecting the section is the point of naming it: once its notes are
+                selected they can be copied to another chorus, retyped, or moved as one.
+              */}
+              <button
+                type="button"
+                className="shrink-0 border border-edge2 px-1 text-faint hover:text-fg"
+                onClick={() => onSelectSection(section.tick, section.endTick, section.name)}
+                title={`Select every note in "${section.name}"`}
+              >
+                Select
               </button>
               <button
                 type="button"

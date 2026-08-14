@@ -27,6 +27,8 @@ interface Props {
   saving: boolean;
   exporting: boolean;
   onShowHelp: () => void;
+  metronomeOn: boolean;
+  onToggleMetronome: () => void;
 }
 
 const PLAYBACK_RATES = [0.25, 0.5, 0.75, 1];
@@ -53,6 +55,8 @@ export default function TransportBar({
   saving,
   exporting,
   onShowHelp,
+  metronomeOn,
+  onToggleMetronome,
 }: Props) {
   return (
     <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-b border-edge bg-panel px-4 py-2">
@@ -111,6 +115,21 @@ export default function TransportBar({
           +
         </button>
       </Control>
+
+      {/*
+        A click on every beat, taken from the chart's own tempo map — so if the click
+        drifts against the song, the tempo is wrong, which is exactly what you want a
+        metronome to tell you while lining a chart up.
+      */}
+      <button
+        type="button"
+        onClick={onToggleMetronome}
+        aria-pressed={metronomeOn}
+        title="Click on every beat, following the chart's tempo"
+        className={`ch-button ${metronomeOn ? 'ch-button-primary' : ''}`}
+      >
+        Click
+      </button>
 
       <Control label="Speed">
         <div className="flex">

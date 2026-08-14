@@ -52,6 +52,18 @@ export type EditorAction =
   | { type: 'setNoteLength'; track: TrackName; id: string; length: number }
   | { type: 'deleteNotes'; track: TrackName; ids: string[] }
   | { type: 'toggleFlag'; track: TrackName; ids: string[]; flag: 'forced' | 'tap' }
+  /**
+   * Set note flags outright, rather than toggling.
+   *
+   * Conversion between strum/HOPO/tap cannot be a toggle: HOPO status is derived from a
+   * note's neighbours and `forced` inverts it, so the right flag differs per note. The
+   * caller works that out (see lib/chart/noteTypes.ts) and hands over the result.
+   */
+  | {
+      type: 'setNoteFlags';
+      track: TrackName;
+      changes: Array<{ id: string; forced: boolean; tap: boolean }>;
+    }
   | { type: 'setNotesLane'; track: TrackName; ids: string[]; lane: Lane }
   | { type: 'select'; ids: string[]; additive?: boolean }
   | { type: 'selectAll'; track: TrackName }
@@ -225,6 +237,21 @@ function applyEdit(project: Project, action: EditorAction): Project {
       const removed = new Set(conflicting.map((n) => n.id));
       const notes = track.notes.filter((n) => !removed.has(n.id)).concat(note);
       return withTrack(project, action.track, sortNotes(notes), track.starPower);
+    }
+
+    case 'setNoteFlags': {
+      if (action.changes.length === 0) return project;
+      const track = project.tracks[action.track];
+      const byId = new Map(action.changes.map((c) => [c.id, c]));
+      let changed = false;
+      const notes = track.notes.map((note) => {
+        const next = byId.get(note.id);
+        if (!next || (next.forced === note.forced && next.tap === note.tap)) return note;
+        changed = true;
+        return { ...note, forced: next.forced, tap: next.tap };
+      });
+      if (!changed) return project;
+      return withTrack(project, action.track, notes, track.starPower);
     }
 
     case 'setNoteLengths': {

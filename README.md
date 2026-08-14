@@ -292,19 +292,19 @@ so repeated notes on one fret correctly stay strums however close together they 
 | Shift / Ctrl + click | Add to or remove from the selection |
 | Shift + drag empty space | Marquee select |
 | Drag a note | Move it, snapped to the grid |
-| Drag a note's tail end | Extend it into a sustain |
+| Drag a note's top or tail | Pull a sustain out of it |
+| Double-click a note | Delete it |
 | Right-click a note | Delete, toggle forced/tap, make open, clear sustain |
 | `1`–`5` | Place a note in that lane at the playhead |
 | `0` | Place an open note |
-| `F` / `T` | Toggle forced / tap on the selection |
 | `Delete` | Delete the selection |
-| `Space` | Play / pause |
 | `Home` | Jump to the start |
 | Mouse wheel | Scrub the timeline (hold Shift to move faster) |
 | `A` `S` `D` `F` `G` | Play the frets in at the playhead; hold for a sustain, `Shift` for a hammer-on |
 | `Space` | Open note (play/pause moved to `Enter`) |
 | `Enter` | Play / pause |
-| `Alt` + `H` / `T` / `O` | Force HOPO / tap / open on the selection |
+| `Alt` + `N` / `H` / `T` | Convert the selection to solid / hammer-on / tap |
+| `Alt` + `O` | Make the selection open notes |
 | `Alt` + `E` / `S` | Sustain to the next note / clear sustains |
 | `Alt` + `P` | Star power tool |
 | `Ctrl`/`Cmd` + `A` | Select everything in this difficulty |
@@ -358,6 +358,65 @@ drag that starts *on* a note still moves it, and a click on an empty lane still 
 Star power, sections and tempo are deliberately not part of a copied block. They belong to
 the song rather than to a run of notes, and pasting should never quietly change phrasing
 somewhere you are not looking.
+
+### Changing note types in bulk
+
+The **Type** group on the note bar converts a selection to **Solid**, **Hammer-on** or
+**Tap**, and the small `⌖` beside each one selects every note of that type in the
+difficulty. Together they are a two-click "turn all the hammer-ons into strums".
+
+These are *conversions*, not toggles, and that distinction is the whole point. HOPO
+status is derived from spacing (see above) and the stored `forced` flag *inverts* it, so
+flipping the flag across a mixed selection turns half of it into the opposite of what you
+asked for. `convertNotes` works out per note whether the flag should be on or off to
+produce the type you named.
+
+### Selecting a whole named section
+
+Every section in the sidebar has a **Select** button. A section marker only records where
+it *starts*, so its extent is "until the next marker" — the last one runs to the end of
+the chart. Selecting one grabs every note in it across all lanes, ready to copy into
+another chorus, retype, or move.
+
+### Metronome
+
+**Click** on the transport bar plays a beat from the chart's own tempo map — accented on
+the downbeat, following time-signature changes. It is scheduled ahead on the Web Audio
+clock rather than fired from `setTimeout`, so it does not jitter.
+
+Because it reads the *chart's* tempo rather than the audio, a click that drifts against
+the song is telling you the tempo map is wrong, which is exactly what you want while
+lining a chart up.
+
+### Auto-charting a gap from the audio
+
+Select a note either side of a stretch you have not charted and press **Auto-chart gap**.
+The server decodes just that window, finds the note attacks in it by spectral flux, and
+places notes on the nearest sixteenth.
+
+Be clear about what this is. Pulling a guitar part out of a finished mix is an open
+research problem — the guitar sits under drums, bass and vocals and distortion smears its
+harmonics. Finding *when* notes are struck is tractable and this does it well. The frets
+are a guess, taken from the relative brightness of each attack so a line that rises in
+pitch rises up the fretboard. **Treat the result as a scaffold to correct, not a chart.**
+
+It only ever writes into the range you marked, and gap-fills on top of that, so it cannot
+touch work you have already done.
+
+### Lead-in, from the editor to the exported folder
+
+Dragging the waveform right adds a lead-in: the music moves later, the notes stay put. One
+rule holds it together — `chartSeconds = audioSeconds + leadIn`.
+
+* In the editor, chart time 0 is the start of the silence. During the lead-in the audio
+  element stays parked at 0 and the clock runs on `performance.now()` alone, handing over
+  when the silence elapses.
+* On export, ffmpeg pads the audio by exactly the lead-in (`adelay`) and `Offset` is left
+  **alone**. Folding the lead-in into `Offset` as well would cancel the pad out.
+
+So the padded file's timeline *is* chart time, and tick 0 lands at the same instant in the
+game as it does on the highway. A 2000 ms lead-in produces 2.000 s of silence in the
+exported WAV, which is asserted end to end rather than assumed.
 
 ### Generating lower difficulties
 

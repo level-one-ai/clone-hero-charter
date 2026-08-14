@@ -24,7 +24,9 @@ import {
   type Lane,
   type Project,
 } from '@/lib/chart/types';
-import { sustainSelectionToNext, sustainToNext } from '@/lib/chart/sustain';
+import { sustainSelectionToNext } from '@/lib/chart/sustain';
+import { convertNotes, selectByType, type NoteType } from '@/lib/chart/noteTypes';
+import { Metronome } from '@/lib/editor/metronome';
 import {
   createLiveEntryState,
   isEntryKey,
@@ -50,6 +52,7 @@ import {
 } from '@/lib/editor/starPowerTool';
 import {
   SaveConflictError,
+  autoChartRange,
   exportSong,
   fetchProject,
   saveChart,
@@ -66,6 +69,13 @@ import {
  */
 
 const AUTOSAVE_DELAY_MS = 1500;
+
+/**
+ * Disagreement between the interpolated playhead and the audio element that is absorbed
+ * silently rather than snapped. Below roughly one frame at 60Hz nobody can see it, and
+ * snapping would be more visible than the error.
+ */
+const DRIFT_TOLERANCE_SEC = 0.02;
 
 export default function EditorShell({ initialProject }: { initialProject: Project }) {
   const router = useRouter();
@@ -93,6 +103,8 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
   const [helpOpen, setHelpOpen] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<'song' | 'sync' | 'sections' | 'check'>('sections');
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [metronomeOn, setMetronomeOn] = useState(false);
+  const metronomeRef = useRef<Metronome | null>(null);
   const [starPowerTool, setStarPowerTool] = useState<StarPowerToolState>(STAR_POWER_TOOL_OFF);
   const clipboardRef = useRef<ClipboardBlock | null>(null);
   /** Server revision this editor is based on — see save(). */
@@ -204,7 +216,32 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
         }
         return;
       }
-      writeClock(audioSeconds + leadInRef.current, isPlaying, false);
+
+      /**
+       * DRIFT GUARD.
+       *
+       * The audio element is the authority, so every reading re-anchors the clock and
+       * the highway can never wander from the music. But re-anchoring hard on a reading
+       * that is only a millisecond or two out would make the playhead visibly twitch
+       * four times a second, because the interpolation is smooth and the readings are
+       * quantised. So: small disagreements are absorbed silently, and only a real
+       * divergence — the kind a dropped frame or a stalled buffer causes — snaps.
+       */
+      const chartSeconds = audioSeconds + leadInRef.current;
+      const drift = Math.abs(chartSeconds - currentTime(clockRef.current));
+      if (isPlaying && drift < DRIFT_TOLERANCE_SEC) {
+        // Absorb: keep the reading as the new anchor so error cannot accumulate, but do
+        // not disturb the UI with a state update.
+        clockRef.current = {
+          ...clockRef.current,
+          audioTime: chartSeconds,
+          wallClock: performance.now(),
+          playing: isPlaying,
+        };
+        return;
+      }
+
+      writeClock(chartSeconds, isPlaying, false);
     },
     [writeClock],
   );
@@ -251,6 +288,142 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
   }, [cancelPreRoll, startPreRoll, writeClock]);
 
   useEffect(() => cancelPreRoll, [cancelPreRoll]);
+
+  /**
+   * Tick the displayed time from the CLOCK, not from audio events.
+   *
+   * The highway reads `clockRef` every frame, so it moves smoothly whatever the audio
+   * element is doing. The readout used to be written only by `writeClock` — which the
+   * drift guard above deliberately skips while playback is healthy — so the clock display
+   * sat frozen at the last big correction while the highway scrolled past it. Driving it
+   * from the same source the highway uses means the number and the notes can never
+   * disagree, which is the whole point of the guard.
+   *
+   * 10Hz, and only while playing: fast enough that the milliseconds look live, slow enough
+   * that it is not re-rendering the editor every frame.
+   */
+  useEffect(() => {
+    if (!playing) return;
+    const id = setInterval(() => setDisplayTime(currentTime(clockRef.current)), 100);
+    return () => clearInterval(id);
+  }, [playing]);
+
+  /**
+   * Metronome.
+   *
+   * Kept in step with playback by starting it from the CURRENT chart position whenever
+   * playback starts, the rate changes or the user seeks — it schedules against the audio
+   * hardware clock from that anchor, so it cannot drift, but it has no way to know about
+   * a seek unless it is re-anchored.
+   */
+  useEffect(() => {
+    metronomeRef.current ??= new Metronome();
+    metronomeRef.current.setTiming(timing, project.resolution);
+  }, [timing, project.resolution]);
+
+  useEffect(() => () => metronomeRef.current?.dispose(), []);
+
+  useEffect(() => {
+    const metronome = metronomeRef.current;
+    if (!metronome) return;
+    if (metronomeOn && playing) {
+      metronome.start({
+        positionSec: currentTime(clockRef.current),
+        rate: playbackRate,
+        volume: 0.35,
+      });
+    } else {
+      metronome.stop();
+    }
+  }, [metronomeOn, playing, playbackRate, displayTime]);
+
+  /** Convert the selection to a solid strum, a hammer-on or a tap. */
+  const handleConvertType = useCallback(
+    (target: NoteType) => {
+      if (selection.size === 0) {
+        setMessage({ kind: 'error', text: 'Select some notes first.' });
+        return;
+      }
+      const notes = project.tracks[trackName].notes;
+      const changes = convertNotes(notes, selection, project.resolution, target);
+      if (changes.length === 0) {
+        setMessage({ kind: 'info', text: 'Those notes are already that type.' });
+        return;
+      }
+      dispatch({ type: 'setNoteFlags', track: trackName, changes });
+      setMessage({
+        kind: 'info',
+        text: `Converted ${changes.length} note${changes.length === 1 ? '' : 's'}.`,
+      });
+    },
+    [selection, project.tracks, project.resolution, trackName],
+  );
+
+  /** Select every note of a given type, so a whole class can be converted at once. */
+  const handleSelectByType = useCallback(
+    (target: NoteType) => {
+      const ids = selectByType(project.tracks[trackName].notes, project.resolution, target);
+      if (ids.length === 0) {
+        setMessage({ kind: 'error', text: `No ${target === 'strum' ? 'solid' : target} notes here.` });
+        return;
+      }
+      dispatch({ type: 'select', ids });
+      setMessage({ kind: 'info', text: `Selected ${ids.length}.` });
+    },
+    [project.tracks, project.resolution, trackName],
+  );
+
+  /**
+   * Fill the selected stretch by listening to the audio.
+   *
+   * The range comes from the SELECTION, which is a deliberate constraint: you have to
+   * point at the hole before it will write anything, so it can never overwrite work. The
+   * server gap-fills on top of that as a second guard.
+   */
+  const [autoCharting, setAutoCharting] = useState(false);
+  const handleAutoChart = useCallback(async () => {
+    const notes = project.tracks[trackName].notes;
+    const selected = notes.filter((n) => selection.has(n.id));
+    if (selected.length < 2) {
+      setMessage({
+        kind: 'error',
+        text: 'Mark the gap first: select a note either side of the stretch you want filled.',
+      });
+      return;
+    }
+    const fromTick = Math.min(...selected.map((n) => n.tick));
+    const toTick = Math.max(...selected.map((n) => n.tick));
+
+    setAutoCharting(true);
+    setMessage({ kind: 'info', text: 'Listening to the audio…' });
+    try {
+      const result = await autoChartRange(projectRef.current.id, {
+        fromTick,
+        toTick,
+        difficulty,
+      });
+      revisionRef.current = result.project.revision ?? 0;
+      dispatch({ type: 'reset', project: result.project });
+      setMessage({
+        kind: 'info',
+        text: `Found ${result.onsets} attacks and added ${result.added} notes. Check the frets — they are estimated from the audio's brightness, so treat them as a starting point.`,
+      });
+    } catch (error) {
+      setMessage({ kind: 'error', text: `Auto-chart failed: ${(error as Error).message}` });
+    } finally {
+      setAutoCharting(false);
+    }
+  }, [project.tracks, trackName, selection, difficulty]);
+
+  /** Select every note inside a named section, ready to copy or edit. */
+  const handleSelectSection = useCallback(
+    (fromTick: number, toTick: number, label: string) => {
+      dispatch({ type: 'selectRange', track: trackName, fromTick, toTick });
+      handleSeek(timing.tickToSec(fromTick));
+      setMessage({ kind: 'info', text: `Selected "${label}".` });
+    },
+    [trackName, timing, handleSeek],
+  );
 
   /**
    * Lead-in drag.
@@ -311,7 +484,13 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
       dispatch({ type: 'setMeta', meta: {}, transient: true });
       dispatch({ type: 'markSaved' });
       setConflict(false);
-      setMessage(null);
+      /*
+        Clear the failure a successful save has just resolved, and nothing else. Wiping
+        the message outright meant every autosave — which fires 1.5s after any edit —
+        swallowed whatever the last action had told you: "Selected \"Chorus\"", "added 14
+        notes", gone before you had read it.
+      */
+      setMessage((current) => (current?.kind === 'error' ? null : current));
       return true;
     } catch (error) {
       if (error instanceof SaveConflictError) {
@@ -577,17 +756,12 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
     dispatch({ type: 'setNoteLengths', track: trackName, changes });
   }, [project.tracks, project.resolution, trackName, selectedNotes]);
 
-  /** Same, for one note — what double-clicking a note on the highway does. */
-  const handleSustainNote = useCallback(
+  /** Double-clicking a note on the highway removes it. */
+  const handleDeleteNote = useCallback(
     (id: string) => {
-      const notes = project.tracks[trackName].notes;
-      const note = notes.find((n) => n.id === id);
-      if (!note) return;
-      const length = sustainToNext(note, notes, { resolution: project.resolution });
-      if (length === note.length) return;
-      dispatch({ type: 'setNoteLengths', track: trackName, changes: [{ id, length }] });
+      dispatch({ type: 'deleteNotes', track: trackName, ids: [id] });
     },
-    [project.tracks, project.resolution, trackName],
+    [trackName],
   );
 
   const moveFret = useCallback(
@@ -740,15 +914,20 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
           else setMessage({ kind: 'error', text: 'Select some notes first.' });
         };
         switch (event.key.toLowerCase()) {
+          /*
+            Convert rather than toggle, matching the note bar. Toggling was the wrong
+            model: whether a note reads as a hammer-on is derived from its neighbours and
+            the stored flag inverts that, so flipping the flag across a mixed selection
+            turns half of it into the opposite of what was asked for.
+          */
           case 'h':
-            withSelection(() =>
-              dispatch({ type: 'toggleFlag', track: trackName, ids: [...selection], flag: 'forced' }),
-            );
+            withSelection(() => handleConvertType('hopo'));
             return;
           case 't':
-            withSelection(() =>
-              dispatch({ type: 'toggleFlag', track: trackName, ids: [...selection], flag: 'tap' }),
-            );
+            withSelection(() => handleConvertType('tap'));
+            return;
+          case 'n':
+            withSelection(() => handleConvertType('strum'));
             return;
           case 'o':
             withSelection(() =>
@@ -861,6 +1040,8 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
     moveFret,
     toggleStarPowerTool,
     starPowerTool.active,
+    handleConvertType,
+    handleSustainToNext,
   ]);
 
   const audioUrl = `/api/songs/${project.id}/audio`;
@@ -941,6 +1122,8 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
         saving={saving}
         exporting={exporting}
         onShowHelp={() => setHelpOpen(true)}
+        metronomeOn={metronomeOn}
+        onToggleMetronome={() => setMetronomeOn((v) => !v)}
       />
 
       <WaveformPanel
@@ -1018,9 +1201,8 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
         onSetLane={(lane) =>
           dispatch({ type: 'setNotesLane', track: trackName, ids: [...selection], lane })
         }
-        onToggleFlag={(flag) =>
-          dispatch({ type: 'toggleFlag', track: trackName, ids: [...selection], flag })
-        }
+        onConvertType={handleConvertType}
+        onSelectByType={handleSelectByType}
         onClearSustain={() => {
           for (const note of selectedNotes) {
             dispatch({ type: 'setNoteLength', track: trackName, id: note.id, length: 0 });
@@ -1028,6 +1210,8 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
         }}
         onDelete={() => dispatch({ type: 'deleteNotes', track: trackName, ids: [...selection] })}
         onSustain={handleSustainToNext}
+        onAutoChart={handleAutoChart}
+        autoCharting={autoCharting}
         onCopy={handleCopy}
         onPaste={handlePaste}
         clipboardLabel={clipboardLabel}
@@ -1050,7 +1234,7 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
             onSeek={handleSeek}
             starPowerTool={starPowerTool}
             onStarPowerClick={handleStarPowerClick}
-            onSustainNote={handleSustainNote}
+            onDeleteNote={handleDeleteNote}
           />
           <KeyLegend />
         </div>
@@ -1104,6 +1288,7 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
                 playheadTick={playheadTick}
                 dispatch={dispatch}
                 onSeekToTick={(tick) => handleSeek(timing.tickToSec(tick))}
+                onSelectSection={handleSelectSection}
               />
             ) : sidebarTab === 'song' ? (
               <SongPropertiesPanel

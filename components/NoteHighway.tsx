@@ -44,8 +44,8 @@ interface Props {
   starPowerTool: { active: boolean; startTick: number | null };
   /** A click while the tool is armed, already snapped to the grid. */
   onStarPowerClick: (tick: number) => void;
-  /** Double-clicking a note extends it to just before the next note on its lane. */
-  onSustainNote: (id: string) => void;
+  /** Double-clicking a note deletes it. */
+  onDeleteNote: (id: string) => void;
 }
 
 type DragState =
@@ -80,7 +80,7 @@ export default function NoteHighway({
   onSeek,
   starPowerTool,
   onStarPowerClick,
-  onSustainNote,
+  onDeleteNote,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [drag, setDrag] = useState<DragState>({ kind: 'none' });
@@ -437,14 +437,21 @@ export default function NoteHighway({
     setDrag({ kind: 'none' });
   };
 
-  /** Double-click a note to run its sustain up to just before the next one on its lane. */
+  /**
+   * Double-click a note to delete it.
+   *
+   * The single-click gesture on a note is select-and-drag, so double-click is the only
+   * mouse action left that can mean "get rid of this" without a modifier — and deleting
+   * is what people reach for far more often than any of the alternatives. Sustaining to
+   * the next note moved to Alt+E and the toolbar's Sustain button.
+   */
   const handleDoubleClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
     if (starPowerTool.active) return;
     const position = pointerPosition(event);
     const ctx = hitContext();
     if (!position || !ctx) return;
     const hit = hitTestNote(track.notes, position.x, position.y, ctx);
-    if (hit) onSustainNote(hit.note.id);
+    if (hit) onDeleteNote(hit.note.id);
   };
 
   const handleContextMenu = (event: React.MouseEvent<HTMLCanvasElement>) => {

@@ -149,6 +149,34 @@ export async function mergeMidiFiles(id: string, files: File[]): Promise<MergeRe
   );
 }
 
+export interface AutoChartResult {
+  project: Project;
+  /** Attacks found in the audio; more than `added` when several snapped together. */
+  onsets: number;
+  added: number;
+  skipped: number;
+}
+
+/**
+ * Chart a marked stretch from the audio.
+ *
+ * Scoped to a range on purpose — see the route. It finds the rhythm of a passage well and
+ * guesses the frets, so it is a scaffold for a section you have not started rather than a
+ * replacement for charting.
+ */
+export async function autoChartRange(
+  id: string,
+  range: { fromTick: number; toTick: number; difficulty: string },
+): Promise<AutoChartResult> {
+  return unwrap<AutoChartResult>(
+    await fetch(`/api/songs/${id}/autochart`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(range),
+    }),
+  );
+}
+
 /** Thrown when the song changed elsewhere since this client loaded it. */
 export class SaveConflictError extends Error {
   readonly storedRevision: number;

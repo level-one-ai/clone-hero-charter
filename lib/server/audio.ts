@@ -288,3 +288,60 @@ function run(command: string, args: string[]): Promise<string> {
     });
   });
 }
+
+
+/**
+ * Decode part of an audio file to mono float samples.
+ *
+ * For onset detection, which needs the raw waveform rather than a container. ffmpeg does
+ * the decoding — it already handles every format we accept — and emits headerless 32-bit
+ * floats, so the only work here is reassembling them.
+ *
+ * `startSec` and `durationSec` window the decode: analysing a marked bar of a song should
+ * not cost a full decode of a five-minute track.
+ *
+ * 22.05kHz mono is deliberate. Onsets are a broadband, low-frequency-dominated
+ * phenomenon, so halving the sample rate halves the work with no loss of detection
+ * accuracy, and mixing to mono means a note struck in one channel still counts.
+ */
+export async function decodeToMono(
+  inputPath: string,
+  startSec = 0,
+  durationSec?: number,
+): Promise<{ samples: Float32Array; sampleRate: number }> {
+  const sampleRate = 22050;
+  const args = ['-hide_banner', '-loglevel', 'error'];
+  // -ss before -i seeks by keyframe and is far faster than decoding from the start.
+  if (startSec > 0) args.push('-ss', String(startSec));
+  args.push('-i', inputPath);
+  if (durationSec !== undefined && durationSec > 0) args.push('-t', String(durationSec));
+  args.push('-vn', '-ac', '1', '-ar', String(sampleRate), '-f', 'f32le', 'pipe:1');
+
+  const chunks: Buffer[] = [];
+  await new Promise<void>((resolve, reject) => {
+    const ffmpeg = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    ffmpeg.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
+    ffmpeg.stderr.on('data', (chunk) => {
+      stderr += String(chunk).slice(0, 2000);
+    });
+    ffmpeg.on('error', (error) =>
+      reject(new Error(`ffmpeg is not available (${error.message})`)),
+    );
+    ffmpeg.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(stderr.trim() || `ffmpeg exited with ${code}`));
+    });
+  });
+
+  const buffer = Buffer.concat(chunks);
+  // A Float32Array view needs 4-byte alignment, which Buffer.concat does not guarantee,
+  // so copy into a fresh aligned buffer rather than viewing in place.
+  const usable = buffer.length - (buffer.length % 4);
+  const samples = new Float32Array(usable / 4);
+  for (let i = 0; i < samples.length; i += 1) {
+    samples[i] = buffer.readFloatLE(i * 4);
+  }
+
+  return { samples, sampleRate };
+}

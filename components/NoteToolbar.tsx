@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { LANE_COLORS, type Lane, type Note } from '@/lib/chart/types';
+import { NOTE_TYPE_LABELS, type NoteType } from '@/lib/chart/noteTypes';
 
 /**
  * Actions on the current selection.
@@ -22,11 +23,18 @@ interface Props {
   onClearSelection: () => void;
   onMoveFret: (delta: number) => void;
   onSetLane: (lane: Lane) => void;
-  onToggleFlag: (flag: 'forced' | 'tap') => void;
+  /** Convert the selection to a solid strum, a hammer-on or a tap. */
+  onConvertType: (target: NoteType) => void;
+  /** Select every note of a given type in this difficulty. */
+  onSelectByType: (target: NoteType) => void;
   onClearSustain: () => void;
   onDelete: () => void;
   /** Extend the selection's sustains to just before the next note on each lane. */
   onSustain: () => void;
+  /** Chart the stretch between the selection's first and last note from the audio. */
+  onAutoChart: () => void;
+  /** True while the server is listening to the audio. */
+  autoCharting: boolean;
   onCopy: (cut: boolean) => void;
   onPaste: () => void;
   /** What is on the clipboard, or null when nothing has been copied yet. */
@@ -45,10 +53,13 @@ export default function NoteToolbar({
   onClearSelection,
   onMoveFret,
   onSetLane,
-  onToggleFlag,
+  onConvertType,
+  onSelectByType,
   onClearSustain,
   onDelete,
   onSustain,
+  onAutoChart,
+  autoCharting,
   onCopy,
   onPaste,
   clipboardLabel,
@@ -60,11 +71,6 @@ export default function NoteToolbar({
   const [more, setMore] = useState(false);
   const count = selectedNotes.length;
   const none = count === 0;
-
-  // A flag reads as "on" only when every selected note has it, matching how the
-  // toggle behaves: pressing it turns the whole selection on unless it already is.
-  const allForced = !none && selectedNotes.every((n) => n.forced);
-  const allTap = !none && selectedNotes.every((n) => n.tap);
 
   return (
     <div className="flex items-center gap-x-3 overflow-x-auto border-b border-edge bg-panel px-4 py-1.5">
@@ -175,25 +181,37 @@ export default function NoteToolbar({
       </Group>
       )}
 
+      {/*
+        Convert, not toggle. Whether a note is a HOPO is DERIVED from its neighbours and
+        the stored flag inverts that, so "make these hammer-ons" needs a different flag
+        per note — a toggle would turn half a mixed selection into the opposite of what
+        was asked for. Clicking the label selects every note of that type, so a whole
+        class can be converted in two clicks.
+      */}
       <Group label="Type">
-        <button
-          type="button"
-          className={`ch-button ${allForced ? 'ch-button-primary' : ''}`}
-          onClick={() => onToggleFlag('forced')}
-          disabled={none}
-          title="Force hammer-on / pull-off, or force a strum (Alt+H)"
-        >
-          HOPO
-        </button>
-        <button
-          type="button"
-          className={`ch-button ${allTap ? 'ch-button-primary' : ''}`}
-          onClick={() => onToggleFlag('tap')}
-          disabled={none}
-          title="Tap note — no strum needed (Alt+T)"
-        >
-          Tap
-        </button>
+        {(['strum', 'hopo', 'tap'] as const).map((target) => (
+          <span key={target} className="flex">
+            <button
+              type="button"
+              className="ch-button"
+              onClick={() => onConvertType(target)}
+              disabled={none}
+              title={`Convert the selection to ${NOTE_TYPE_LABELS[target].toLowerCase()} notes`}
+            >
+              {NOTE_TYPE_LABELS[target]}
+            </button>
+            <button
+              type="button"
+              className="border border-l-0 border-edge2 bg-panel px-1 text-2xs text-faint hover:text-fg"
+              onClick={() => onSelectByType(target)}
+              disabled={totalNotes === 0}
+              title={`Select every ${NOTE_TYPE_LABELS[target].toLowerCase()} note in this difficulty`}
+              aria-label={`Select every ${NOTE_TYPE_LABELS[target].toLowerCase()} note`}
+            >
+              ⌖
+            </button>
+          </span>
+        ))}
       </Group>
 
       <Group label="Other">
@@ -219,6 +237,25 @@ export default function NoteToolbar({
           title="Extend each selected note to just before the next one on its lane (Alt+E)"
         >
           Sustain
+        </button>
+        {/*
+          Deliberately gated on TWO selected notes rather than one or none. The range it
+          fills is "between the notes you picked", so selecting a note either side of a
+          hole is both how you aim it and the guarantee that it cannot wander into work
+          you have already done.
+        */}
+        <button
+          type="button"
+          className="ch-button"
+          onClick={onAutoChart}
+          disabled={count < 2 || autoCharting}
+          title={
+            count < 2
+              ? 'Select a note either side of the gap you want filled, then press this'
+              : 'Listen to the audio and chart the stretch between the selected notes'
+          }
+        >
+          {autoCharting ? 'Listening…' : 'Auto-chart gap'}
         </button>
         {more && (
           <button
