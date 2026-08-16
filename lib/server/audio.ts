@@ -237,7 +237,7 @@ export const NO_SHAPING: AudioShape = {
  * second (silence after it). `all=1` on adelay applies the delay to every channel —
  * without it only the first channel moves and the result is audibly out of phase.
  */
-function transcodeArgs(
+export function transcodeArgs(
   inputPath: string,
   shape: AudioShape,
   format: ExportAudioFormat,

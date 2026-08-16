@@ -322,7 +322,12 @@ export function resolveExportFile(
   if (name === 'song.ini') {
     return {
       kind: 'text',
-      body: generateSongIni(exportProjectFor(plan), { durationMs: plan.durationMs }),
+      body: generateSongIni(exportProjectFor(plan), {
+        durationMs: plan.durationMs,
+        // The music alone, so the difficulty estimate is notes per second of PLAYING
+        // rather than notes per second of a file that is mostly silence or unused audio.
+        musicDurationMs: Math.max(0, plan.region.endMs - plan.region.startMs),
+      }),
       contentType: 'text/plain; charset=utf-8',
     };
   }
