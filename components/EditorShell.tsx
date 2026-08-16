@@ -29,12 +29,14 @@ import {
 import { snapTick, type SnapDivision } from '@/lib/chart/snap';
 import {
   DIFFICULTIES,
+  LANE_LABELS,
   newNoteId,
   trackNameFor,
   type Difficulty,
   type Lane,
   type Project,
 } from '@/lib/chart/types';
+import { copySection, selectByLane, type Section } from '@/lib/chart/sections';
 import { sustainSelectionToNext } from '@/lib/chart/sustain';
 import { convertNotes, selectByType, type NoteType } from '@/lib/chart/noteTypes';
 import { Metronome } from '@/lib/editor/metronome';
@@ -461,6 +463,69 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
       setMessage({ kind: 'info', text: `Selected "${label}".` });
     },
     [trackName, timing, handleSeek],
+  );
+
+  /**
+   * Select notes by colour, scoped to whichever sections are armed.
+   *
+   * With none armed the scope is the whole chart — not a fallback but the same question
+   * asked of a chart that has no structure marked yet.
+   */
+  const handleSelectLanes = useCallback(
+    (lanes: Lane[], sections: Section[]) => {
+      const ids = selectByLane(project.tracks[trackName].notes, lanes, sections);
+      dispatch({ type: 'select', ids });
+      const colours = lanes.map((lane) => LANE_LABELS[lane].toLowerCase()).join(', ');
+      const where = sections.length > 0 ? ` in ${sections.map((s) => s.name).join(', ')}` : '';
+      setMessage({
+        kind: 'info',
+        text:
+          ids.length > 0
+            ? `Selected ${ids.length} ${colours} note${ids.length === 1 ? '' : 's'}${where}.`
+            : `No ${colours} notes${where}.`,
+      });
+    },
+    [project.tracks, trackName],
+  );
+
+  /**
+   * Copy one section's notes onto another, keeping their position within the section.
+   *
+   * One history step: the replacement and the insertion have to undo together, or an undo
+   * would leave the target empty — worse than either state.
+   */
+  const handleCopySection = useCallback(
+    (from: Section, to: Section) => {
+      const result = copySection(project.tracks[trackName].notes, from, to, newNoteId);
+      if (result.notes.length === 0 && result.replacedIds.length === 0) {
+        setMessage({ kind: 'error', text: `"${from.name}" has no notes to copy.` });
+        return;
+      }
+
+      const kept = project.tracks[trackName].notes.filter(
+        (note) => !result.replacedIds.includes(note.id),
+      );
+      dispatch({
+        type: 'replaceTrack',
+        track: trackName,
+        notes: [...kept, ...result.notes].sort((a, b) => a.tick - b.tick || a.lane - b.lane),
+        starPower: project.tracks[trackName].starPower,
+      });
+      dispatch({ type: 'select', ids: result.notes.map((note) => note.id) });
+      handleSeek(timing.tickToSec(to.tick));
+
+      const replaced =
+        result.replacedIds.length > 0 ? `, replacing ${result.replacedIds.length}` : '';
+      const overflow =
+        result.overflowCount > 0
+          ? ` ${result.overflowCount} run past the end of "${to.name}" — its marker may be early.`
+          : '';
+      setMessage({
+        kind: 'info',
+        text: `Copied ${result.notes.length} note${result.notes.length === 1 ? '' : 's'} from "${from.name}" into "${to.name}"${replaced}.${overflow}`,
+      });
+    },
+    [project.tracks, trackName, handleSeek, timing],
   );
 
   /**
@@ -1455,6 +1520,8 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
                 dispatch={dispatch}
                 onSeekToTick={(tick) => handleSeek(timing.tickToSec(tick))}
                 onSelectSection={handleSelectSection}
+                onSelectLanes={handleSelectLanes}
+                onCopySection={handleCopySection}
               />
             ) : sidebarTab === 'song' ? (
               <SongPropertiesPanel
