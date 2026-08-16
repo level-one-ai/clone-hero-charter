@@ -37,6 +37,8 @@ import {
   type Project,
 } from '@/lib/chart/types';
 import { copySection, selectByLane, type Section } from '@/lib/chart/sections';
+import { countBySeverity, validateChart } from '@/lib/chart/validateChart';
+import Disclosure from './Disclosure';
 import { sustainSelectionToNext } from '@/lib/chart/sustain';
 import { convertNotes, selectByType, type NoteType } from '@/lib/chart/noteTypes';
 import { Metronome } from '@/lib/editor/metronome';
@@ -121,7 +123,7 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
   const [exportOpen, setExportOpen] = useState(false);
   const [reimportOpen, setReimportOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [sidebarTab, setSidebarTab] = useState<'song' | 'sync' | 'sections' | 'check'>('sections');
+  const [sidebarTab, setSidebarTab] = useState<'song' | 'sync' | 'sections'>('sections');
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [metronomeOn, setMetronomeOn] = useState(false);
   /** True while the charter is dragging out the section of a long upload to chart. */
@@ -866,6 +868,20 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
   );
 
   /**
+   * The chart check's headline number, for the Song tab's badge.
+   *
+   * Computed here rather than inside the panel so the count is visible without opening
+   * the tab — which is the trade the check made when it lost its own tab. A problem you
+   * have to go looking for is one you ship.
+   */
+  const chartIssues = useMemo(
+    () => validateChart(project, { durationMs: project.audio.durationMs }),
+    [project],
+  );
+  const issueCount = chartIssues.length;
+  const hasErrors = useMemo(() => countBySeverity(chartIssues).errors > 0, [chartIssues]);
+
+  /**
    * Star power is placed point to point: arm the tool, click where the phrase starts,
    * click where it ends. It disarms itself afterwards so a stray click on the highway
    * cannot silently create a second phrase.
@@ -1486,32 +1502,36 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
         <aside
           className={`${sidebarOpen ? 'flex w-72' : 'hidden'} shrink-0 flex-col border-l border-edge bg-panel`}
         >
+          {/*
+            Three tabs, not four. The chart check used to have its own, which meant a
+            surface you visit twice per project sat permanently alongside the two you use
+            constantly — and every tab costs a reading of the whole row. It now lives under
+            Song, with its issue count on the tab so a problem is still visible without
+            opening it. Nothing was removed; the check is one click from where it was.
+          */}
           <nav className="flex shrink-0 border-b border-edge">
-            {(['sections', 'song', 'sync', 'check'] as const).map((tab) => (
+            {(['sections', 'sync', 'song'] as const).map((tab) => (
               <button
                 key={tab}
                 type="button"
                 onClick={() => setSidebarTab(tab)}
                 className={`ch-tab flex-1 ${sidebarTab === tab ? 'ch-tab-active' : ''}`}
               >
-                {tab === 'sections'
-                  ? 'Chart'
-                  : tab === 'song'
-                    ? 'Song'
-                    : tab === 'sync'
-                      ? 'Sync'
-                      : 'Check'}
+                {tab === 'sections' ? 'Chart' : tab === 'sync' ? 'Sync' : 'Song'}
+                {tab === 'song' && issueCount > 0 && (
+                  <span
+                    className={`ml-1 font-mono ${hasErrors ? 'text-lane-red' : 'text-lane-orange'}`}
+                    title={`${issueCount} thing${issueCount === 1 ? '' : 's'} the chart check found`}
+                  >
+                    {issueCount}
+                  </span>
+                )}
               </button>
             ))}
           </nav>
 
           <div className="min-h-0 flex-1 overflow-y-auto">
-            {sidebarTab === 'check' ? (
-              <ChartCheckPanel
-                project={project}
-                onSeekToTick={(tick) => handleSeek(timing.tickToSec(tick))}
-              />
-            ) : sidebarTab === 'sections' ? (
+            {sidebarTab === 'sections' ? (
               <SectionsPanel
                 project={project}
                 trackName={trackName}
@@ -1524,14 +1544,29 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
                 onCopySection={handleCopySection}
               />
             ) : sidebarTab === 'song' ? (
-              <SongPropertiesPanel
-                project={project}
-                dispatch={dispatch}
-                onAlbumChanged={(filename) =>
-                  setMessage({ kind: 'info', text: `Album art updated (${filename}).` })
-                }
-                onRequestReimport={() => setReimportOpen(true)}
-              />
+              <>
+                <SongPropertiesPanel
+                  project={project}
+                  dispatch={dispatch}
+                  onAlbumChanged={(filename) =>
+                    setMessage({ kind: 'info', text: `Album art updated (${filename}).` })
+                  }
+                  onRequestReimport={() => setReimportOpen(true)}
+                />
+                {/*
+                  Open by default when there is something to fix, closed when there is
+                  not. A clean check is worth knowing about but not worth scrolling past.
+                */}
+                <Disclosure
+                  label={issueCount > 0 ? `Chart check — ${issueCount}` : 'Chart check — clear'}
+                  defaultOpen={issueCount > 0}
+                >
+                  <ChartCheckPanel
+                    project={project}
+                    onSeekToTick={(tick) => handleSeek(timing.tickToSec(tick))}
+                  />
+                </Disclosure>
+              </>
             ) : (
               <SyncPanel
                 project={project}
