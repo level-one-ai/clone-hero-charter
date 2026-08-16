@@ -11,6 +11,7 @@ import {
 import { GUITAR_PRO_EXTENSIONS, parseGuitarPro } from '@/lib/server/guitarPro';
 import { isValidSongId, songDir } from '@/lib/server/paths';
 import { readProject, saveProject } from '@/lib/server/storage';
+import { alignImportToLeadIn } from '@/lib/chart/alignImport';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -212,14 +213,19 @@ export async function POST(request: Request, { params }: Params) {
     });
     console.log(`[midi-reimport ${id}]\n${formatImportReport(result.report)}`);
 
-    // Keep everything that is not derived from the MIDI.
-    const project = {
-      ...result.project,
-      id,
-      meta: existing.meta,
-      audio: existing.audio,
-      album: existing.album,
-    };
+    // Keep everything that is not derived from the MIDI, then slide the imported notes
+    // and tempo map in behind the existing lead-in so bar 1 of the score lands on the
+    // first musical bar of the chart rather than inside the count-in.
+    const project = alignImportToLeadIn(
+      {
+        ...result.project,
+        id,
+        meta: existing.meta,
+        audio: existing.audio,
+        album: existing.album,
+      },
+      existing.meta.leadIn,
+    );
 
     await saveProject(project);
     return NextResponse.json({ ok: true, project, report: result.report });
