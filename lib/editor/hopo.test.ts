@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { isHopo } from './useHighwayRenderer';
+import { effectiveType, flagsForType } from '../chart/noteTypes';
 import { DEFAULT_RESOLUTION, type Lane, type Note } from '../chart/types';
 
 /**
@@ -124,5 +125,102 @@ describe('isHopo', () => {
       { tick: 240, lane: 2 },
     ]);
     expect(isHopo(notes, 2, THRESHOLD)).toBe(false);
+  });
+});
+
+/**
+ * The highway and the conversion tools MUST agree about what a hammer-on is.
+ *
+ * They used to derive it separately and disagreed about a note following a chord:
+ * converting such a note to a hammer-on set `forced` against one rule while the highway
+ * drew it against the other, so the note came out looking — and playing — like a strum.
+ * These tests pin the agreement rather than either implementation, so a future change to
+ * one that does not reach the other fails here.
+ */
+describe('what you convert is what you see', () => {
+  const cases: Array<{ name: string; spec: Array<{ tick: number; lane: Lane }> ; index: number }> = [
+    {
+      name: 'a close note on a different fret',
+      spec: [
+        { tick: 0, lane: 0 },
+        { tick: 48, lane: 1 },
+      ],
+      index: 1,
+    },
+    {
+      name: 'a note repeating the previous fret',
+      spec: [
+        { tick: 0, lane: 0 },
+        { tick: 48, lane: 0 },
+      ],
+      index: 1,
+    },
+    {
+      /**
+       * The case the two derivations actually disagreed on. The chord's highest note is
+       * the array's immediate predecessor, so a following note on THAT fret looked like a
+       * repeated fret to the conversion layer (never a HOPO) and like a post-chord note to
+       * the renderer (always a HOPO). Converting it to a hammer-on produced a strum.
+       */
+      name: 'a note following a chord, on the chord’s upper fret',
+      spec: [
+        { tick: 0, lane: 0 },
+        { tick: 0, lane: 1 },
+        { tick: 48, lane: 1 },
+      ],
+      index: 2,
+    },
+    {
+      name: 'a note far from its predecessor',
+      spec: [
+        { tick: 0, lane: 0 },
+        { tick: 384, lane: 1 },
+      ],
+      index: 1,
+    },
+    {
+      name: 'a note inside a chord',
+      spec: [
+        { tick: 0, lane: 0 },
+        { tick: 48, lane: 1 },
+        { tick: 48, lane: 2 },
+      ],
+      index: 1,
+    },
+  ];
+
+  for (const { name, spec, index } of cases) {
+    it(`draws ${name} as a hammer-on once converted to one`, () => {
+      const notes = chart(spec);
+      const flags = flagsForType(notes, index, R, 'hopo');
+      const converted = notes.map((note, i) => (i === index ? { ...note, ...flags } : note));
+
+      expect(isHopo(converted, index, THRESHOLD)).toBe(true);
+      expect(effectiveType(converted, index, R)).toBe('hopo');
+    });
+
+    it(`draws ${name} as a strum once converted to one`, () => {
+      const notes = chart(spec);
+      const flags = flagsForType(notes, index, R, 'strum');
+      const converted = notes.map((note, i) => (i === index ? { ...note, ...flags } : note));
+
+      expect(isHopo(converted, index, THRESHOLD)).toBe(false);
+      expect(effectiveType(converted, index, R)).toBe('strum');
+    });
+  }
+
+  it('agrees with the conversion layer on every unforced note', () => {
+    const notes = chart([
+      { tick: 0, lane: 0 },
+      { tick: 48, lane: 1 },
+      { tick: 96, lane: 1 },
+      { tick: 144, lane: 2 },
+      { tick: 144, lane: 3 },
+      { tick: 192, lane: 0 },
+      { tick: 600, lane: 4 },
+    ]);
+    notes.forEach((_, index) => {
+      expect(isHopo(notes, index, THRESHOLD)).toBe(effectiveType(notes, index, R) === 'hopo');
+    });
   });
 });

@@ -21,32 +21,47 @@ export type NoteType = 'strum' | 'hopo' | 'tap';
 /**
  * Would this note play as a HOPO with no `forced` flag?
  *
- * Natural HOPO: close behind the previous note, on a different lane, and not part of a
- * chord. Mirrors the rule the renderer draws with, so what you see is what converts.
+ * THE CANONICAL DERIVATION. The renderer draws from this and the conversion tools decide
+ * `forced` from it, which is not a tidiness point: the two used to derive it separately
+ * and disagreed about a note following a chord. Converting such a note to a hammer-on set
+ * `forced` against one rule while the highway drew it against the other, so the note came
+ * out looking — and playing — like a strum. Anything that needs to know whether a note
+ * hammers on calls this.
+ *
+ * The rules Clone Hero applies:
+ *   - a chord (more than one note on a tick) is never a natural HOPO
+ *   - a single note within the threshold of the previous note is a natural HOPO, unless
+ *     it repeats the previous note's fret — a repeat needs a fresh strum
+ *   - a note following a CHORD is a natural HOPO whatever fret it lands on, because there
+ *     is no single previous fret for it to be repeating
+ *
+ * `notes` must be sorted by tick; every caller in the app keeps its tracks that way.
  */
 export function isNaturalHopo(notes: Note[], index: number, resolution: number): boolean {
   const note = notes[index];
   if (!note || index === 0) return false;
+  // Open notes have no fret to hammer from, so they have no natural status either.
+  if (note.lane === 7) return false;
 
   const threshold = resolution / HOPO_THRESHOLD_DIVISOR;
 
-  // A chord is never a natural HOPO, however close it is.
-  const sameTick = notes.filter((n) => n.tick === note.tick);
-  if (sameTick.length > 1) return false;
+  // Chord test against the immediate neighbours; the array is tick-sorted, so any note
+  // sharing this tick is adjacent.
+  const isChord =
+    (index > 0 && notes[index - 1].tick === note.tick) ||
+    (index + 1 < notes.length && notes[index + 1].tick === note.tick);
+  if (isChord) return false;
 
-  // Nearest strictly-earlier note.
-  let previous: Note | null = null;
-  for (let i = index - 1; i >= 0; i -= 1) {
-    if (notes[i].tick < note.tick) {
-      previous = notes[i];
-      break;
-    }
-  }
-  if (!previous) return false;
+  // Walk back past anything sharing this tick to the real predecessor.
+  let previousIndex = index - 1;
+  while (previousIndex >= 0 && notes[previousIndex].tick === note.tick) previousIndex -= 1;
+  if (previousIndex < 0) return false;
 
-  if (note.tick - previous.tick > threshold) return false;
-  // Repeating the same lane needs a fresh strum, so it is never a natural HOPO.
-  return previous.lane !== note.lane;
+  const previous = notes[previousIndex];
+  const previousIsChord = previousIndex > 0 && notes[previousIndex - 1].tick === previous.tick;
+  const gap = note.tick - previous.tick;
+
+  return gap > 0 && gap <= threshold && (previousIsChord || previous.lane !== note.lane);
 }
 
 /** How a note actually plays, taking the derivation and `forced` together. */
