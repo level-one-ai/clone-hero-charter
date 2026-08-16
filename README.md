@@ -371,12 +371,30 @@ flipping the flag across a mixed selection turns half of it into the opposite of
 asked for. `convertNotes` works out per note whether the flag should be on or off to
 produce the type you named.
 
-### Selecting a whole named section
+### Working with named sections
 
-Every section in the sidebar has a **Select** button. A section marker only records where
-it *starts*, so its extent is "until the next marker" — the last one runs to the end of
-the chart. Selecting one grabs every note in it across all lanes, ready to copy into
-another chorus, retype, or move.
+A section marker only records where it *starts*, so its extent is "until the next marker" —
+the last one runs to the end of the chart. Everything below follows from that.
+
+**Select** grabs every note in a section across all lanes, ready to retype or move.
+
+**Copy** takes one section's notes onto another. Timing is kept *relative to the section
+start*, so a note a beat and a half into the first chorus lands a beat and a half into the
+second, whatever ticks the two sit at — the only definition under which "copy the chorus"
+means what a musician means by it. Sections sharing a base name are offered first, since
+Chorus → Chorus 2 is overwhelmingly the operation. Notes already in the target are
+replaced. Notes overhanging a shorter target are placed and counted rather than dropped: a
+missing tail is far harder to notice than an overhanging one.
+
+**Select by colour** takes any set of colours. Tick sections to scope it to them; with none
+ticked it searches the whole chart, which is the same question asked of a chart that has no
+structure marked yet.
+
+Section names **number themselves**. The first of a name is unnumbered and the next gets a
+number — Chorus, Chorus 2, Chorus 3 — matching how people talk about songs, and the preset
+button shows the name it will produce before you press it. Numbers fill the first free slot,
+so deleting a mislabelled Chorus 2 and pressing again gives it back rather than jumping to
+Chorus 4.
 
 ### Metronome
 
@@ -403,20 +421,41 @@ pitch rises up the fretboard. **Treat the result as a scaffold to correct, not a
 It only ever writes into the range you marked, and gap-fills on top of that, so it cannot
 touch work you have already done.
 
-### Lead-in, from the editor to the exported folder
+### The audio timeline, from the editor to the exported folder
 
-Dragging the waveform right adds a lead-in: the music moves later, the notes stay put. One
-rule holds it together — `chartSeconds = audioSeconds + leadIn`.
+Three spans sit between tick 0 and a position in the uploaded file, and `lib/chart/audioTimeline.ts`
+owns all three so the editor, the metronome, auto-charting and the export cannot disagree:
+
+```
+0            leadInSec                        leadInSec + regionSec        end
+|-- silence --|------------- region -------------|------- trailing -------|
+              ^ region.startMs in the source file
+```
+
+* The **lead-in** is silence before the music, counted in **bars and beats** — never
+  milliseconds. A whole number of bars ends on a downbeat at any tempo, so the music starts
+  on beat one and every barline afterwards lines up with the recording. A lead-in in
+  milliseconds lands mid-beat and puts the entire grid permanently out of phase. Every
+  chart gets at least two bars, enforced at the persistence boundary rather than only in
+  the UI.
+* The **region** is the slice of the upload this chart covers, for charting one song out of
+  an album side or a live set. Its start doubles as the sync anchor: put it on the first
+  downbeat and bar 1 of the chart is bar 1 of the music.
+* The **trailing silence** stops a section cut out of a continuous recording from running
+  into the next track.
+
+Chart time and file time therefore differ by a single constant, `regionStartSec - leadInSec`.
 
 * In the editor, chart time 0 is the start of the silence. During the lead-in the audio
-  element stays parked at 0 and the clock runs on `performance.now()` alone, handing over
-  when the silence elapses.
-* On export, ffmpeg pads the audio by exactly the lead-in (`adelay`) and `Offset` is left
-  **alone**. Folding the lead-in into `Offset` as well would cancel the pad out.
+  element stays parked at the region start and the clock runs on `performance.now()` alone,
+  handing over when the silence elapses.
+* On export, ffmpeg cuts the region, prepends the lead-in (`adelay`) and pads the tail
+  (`apad`). The cut is placed **after** `-i` so it is sample-accurate rather than snapping
+  to the nearest keyframe. `Offset` is left **alone** — folding the lead-in into it would
+  cancel the pad out.
 
-So the padded file's timeline *is* chart time, and tick 0 lands at the same instant in the
-game as it does on the highway. A 2000 ms lead-in produces 2.000 s of silence in the
-exported WAV, which is asserted end to end rather than assumed.
+So the packaged file's timeline *is* chart time, and tick 0 lands at the same instant in the
+game as it does on the highway.
 
 ### Generating lower difficulties
 
@@ -496,13 +535,14 @@ not accept overlapping phrases.
 
 ### Lead-in silence
 
-**Drag the grip at the left of the waveform to the right.** The music slides later and the
-highway gains empty space before the first beat — which is what you need when a song
-starts too fast to chart its opening. The number of seconds is shown in the hatched gutter
-as you drag, and the field under **Sync** still takes an exact value.
+Set it in **bars and beats** under **Sync**. Every chart starts with at least two bars of
+silence, because a song that opens on beat one gives you no run-up at all; add more to line
+the music up on a particular beat. The hatched gutter at the left of the waveform shows how
+much time that buys at the current tempo.
 
 The notes you have already placed do **not** move: the music moves relative to them. Tick
-0 becomes the start of the silence.
+0 becomes the start of the silence. Because the length is derived from the tempo map rather
+than stored, changing the anchor BPM changes the silence with it — two bars stays two bars.
 
 The editor previews this honestly rather than approximating it. An `<audio>` element has
 no negative time, so the silence cannot come from the file; the clock runs the lead-in on
@@ -513,20 +553,49 @@ At export, ffmpeg prepends the real silence and `Offset` is deliberately left al
 padded file's timeline already *is* chart time, so adding the lead-in to `Offset` as well
 would cancel the padding out. `song_length` accounts for it.
 
+### Charting one section of a long upload
+
+Press **Choose section** under **Sync** and drag across the waveform. The chart then covers
+that slice: the editor plays it, chart time zero sits a lead-in before it, and the export
+packages exactly it — with the lead-in in front and the tail silence behind, so a section
+lifted out of a continuous recording does not run into whatever came next.
+
+The upload on disk is never modified. Clearing the region (**Use all**) returns to the whole
+file; re-dragging re-aims the chart. Because the region start is also the sync anchor, the
+**start point** nudges beside it move the music against bar 1 of the chart in whole beats —
+which is how you line the grid up by ear when detection has found the pulse but not the
+downbeat.
+
 ### Song properties
 
-The editor sidebar has two tabs. **Song** edits the title, artist, album, year, genre
-and charter, and replaces the album art — with a live preview of the export folder name,
-since three of those fields determine it. **Sync** holds the tempo map, time signatures
-and chart offset. Property edits go through the same undo history and autosave as note
-edits.
+The editor sidebar has three tabs. **Chart** holds sections, section copying, colour
+selection and star power. **Sync** holds everything that decides where in time the chart
+sits — tempo, alignment, the lead-in, and behind a disclosure the time signature, offset and
+tail silence. **Song** edits the title, artist, album, year, genre and charter, replaces the
+album art, and carries the chart check, with its issue count shown on the tab. Property
+edits go through the same undo history and autosave as note edits.
 
-### Auto-detect BPM
+### Tempo detection
 
-Analyses the decoded audio in your browser and suggests a starting tempo. Treat it as
-a starting point, not an answer — beat detection is frequently wrong on songs with
-tempo changes or sparse percussion, and often reports half or double the real tempo.
-Always confirm against the waveform before charting on top of it.
+Detection runs **once, automatically**, when a project is opened with no tempo set and no
+notes charted. Every song used to start life at 120 BPM, which is right for almost none of
+them and meant every chart began by fixing the tempo by hand. It analyses the decoded audio
+in your browser — wavesurfer has already decoded it, so the buffer is sitting there — and
+sets the tick-0 anchor BPM, aligning the region start to the beat it found.
+
+It reports two things the raw library does not:
+
+* the **first beat**, so the grid gets the right phase and not just the right spacing;
+* a **confidence**, derived by analysing the two halves of the section separately and
+  comparing them. Half and double are folded together first, since a detector reporting 85
+  for one half of a 170 BPM track has found the pulse and named it differently.
+
+Treat the number as a starting point, not an answer — detection is frequently wrong on
+material with tempo changes or sparse percussion. Where it is least reliable is the
+downbeat: it finds *beats*, with no notion of where a bar begins. That is what the
+**start point** nudges are for. Re-running it from **Sync** shows the result with an
+explicit **Use & align** / **Tempo only** choice rather than overwriting the anchor
+silently.
 
 ---
 

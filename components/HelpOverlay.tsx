@@ -58,6 +58,8 @@ const GROUPS: Array<{ title: string; rows: Array<[string, string]> }> = [
       ['Ctrl / Cmd + A', 'Select everything in this difficulty'],
       ['⌖ on the note bar', 'Select every solid, hammer-on or tap note at once'],
       ['Select on a section', 'Select every note in a named section'],
+      ['Colour buttons, Chart tab', 'Select every note of a colour — tick sections to narrow it'],
+      ['Copy on a section', 'Put its notes into another section, timing kept'],
       ['Esc', 'Clear the selection'],
     ],
   },
