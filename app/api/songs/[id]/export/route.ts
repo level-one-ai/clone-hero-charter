@@ -181,6 +181,10 @@ export async function GET(request: Request, { params }: Params) {
       audioFormat: plan.audioFormat,
       chartFormat: plan.chartFormat,
       leadingSilenceMs: plan.leadingSilenceMs,
+      trailingSilenceMs: plan.trailingSilenceMs,
+      durationMs: plan.durationMs,
+      trimmed: plan.trimmed,
+      region: plan.region,
     });
   }
 

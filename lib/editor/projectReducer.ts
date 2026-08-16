@@ -1,6 +1,8 @@
 import {
   newNoteId,
+  type AudioRegion,
   type BpmMarker,
+  type DetectedTempo,
   type Lane,
   type Note,
   type Project,
@@ -93,6 +95,13 @@ export type EditorAction =
    * one undo takes back the whole drag rather than one pixel of it.
    */
   | { type: 'setMeta'; meta: Partial<Project['meta']>; transient?: boolean }
+  /**
+   * Re-aim the charted slice of the audio. `transient` marks the intermediate values a
+   * region-handle drag produces, exactly as it does for setMeta.
+   */
+  | { type: 'setAudioRegion'; region: AudioRegion | null; transient?: boolean }
+  /** Record what beat detection found, so the UI can show where the anchor came from. */
+  | { type: 'setAudioDetection'; detected: DetectedTempo | null }
   | { type: 'setStarPower'; track: TrackName; phrases: Project['tracks'][TrackName]['starPower'] }
   | { type: 'undo' }
   | { type: 'redo' }
@@ -110,6 +119,7 @@ export function createEditorState(project: Project): EditorState {
 /** Actions that only affect the UI, not the chart, and so must not enter history. */
 function isHistoryAction(action: EditorAction): boolean {
   if (action.type === 'setMeta' && action.transient) return false;
+  if (action.type === 'setAudioRegion' && action.transient) return false;
   switch (action.type) {
     case 'select':
     case 'selectAll':
@@ -454,6 +464,25 @@ function applyEdit(project: Project, action: EditorAction): Project {
 
     case 'setMeta':
       return { ...project, meta: { ...project.meta, ...action.meta } };
+
+    case 'setAudioRegion': {
+      const region = action.region;
+      if (!region) {
+        if (!project.audio.region) return project;
+        return { ...project, audio: { ...project.audio, region: null } };
+      }
+      const duration = project.audio.durationMs || 0;
+      const startMs = clamp(Math.round(region.startMs), 0, duration);
+      // A region has to contain something; an inverted or empty one would silently
+      // export a zero-length song, which is far harder to diagnose than a clamp.
+      const endMs = clamp(Math.round(region.endMs), startMs + 1, Math.max(startMs + 1, duration));
+      const existing = project.audio.region;
+      if (existing && existing.startMs === startMs && existing.endMs === endMs) return project;
+      return { ...project, audio: { ...project.audio, region: { startMs, endMs } } };
+    }
+
+    case 'setAudioDetection':
+      return { ...project, audio: { ...project.audio, detected: action.detected } };
 
     default:
       return project;

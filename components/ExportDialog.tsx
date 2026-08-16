@@ -12,6 +12,7 @@ import {
   type ExportPreflight,
 } from '@/lib/client/api';
 import { countBySeverity, summariseIssues, validateChart } from '@/lib/chart/validateChart';
+import { formatTime } from '@/lib/chart/timing';
 
 /**
  * Export dialog.
@@ -123,7 +124,6 @@ export default function ExportDialog({
     ...(project.album ? [project.album.toLowerCase().endsWith('.png') ? 'album.png' : 'album.jpg'] : []),
   ];
   const warnings = plan?.warnings ?? [];
-  const leadIn = plan?.leadingSilenceMs ?? project.meta.leadingSilenceMs;
 
   return (
     <div
@@ -190,11 +190,37 @@ export default function ExportDialog({
             </div>
           )}
 
-          {leadIn > 0 && (
-            <p className="text-2xs text-faint">
-              {(leadIn / 1000).toFixed(2)}s of silence is added to the start of the audio so the
-              chart lines up in game.
-            </p>
+          {/*
+            What the packaged audio will actually be. These numbers come from the server's
+            dry run, which is the same plan the download uses, so this is a report rather
+            than a prediction — the point of showing it is that a trimmed section is a
+            destructive-looking operation and should be confirmed before it happens.
+          */}
+          {plan && (
+            <div className="border border-edge2 bg-bg p-2 text-2xs text-muted">
+              <p className="text-fg">Packaged audio</p>
+              <ul className="mt-1 space-y-0.5">
+                {plan.leadingSilenceMs > 0 && (
+                  <li>— {(plan.leadingSilenceMs / 1000).toFixed(2)}s lead-in silence</li>
+                )}
+                <li>
+                  {plan.trimmed ? (
+                    <>
+                      — {formatTime(plan.region.startMs / 1000)} –{' '}
+                      {formatTime(plan.region.endMs / 1000)} of the upload
+                    </>
+                  ) : (
+                    <>— the whole uploaded file</>
+                  )}
+                </li>
+                {plan.trailingSilenceMs > 0 && (
+                  <li>— {(plan.trailingSilenceMs / 1000).toFixed(2)}s tail silence</li>
+                )}
+                <li className="text-faint">
+                  {formatTime(plan.durationMs / 1000)} total, which is what song.ini reports.
+                </li>
+              </ul>
+            </div>
           )}
 
           {/*

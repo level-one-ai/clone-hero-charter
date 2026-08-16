@@ -252,6 +252,12 @@ export interface ExportPreflight {
   audioFormat: ExportAudioFormat;
   chartFormat: ChartFormat;
   leadingSilenceMs: number;
+  trailingSilenceMs: number;
+  /** Lead-in + charted region + trailing silence: the length of the packaged audio. */
+  durationMs: number;
+  /** True when only part of the uploaded file is being packaged. */
+  trimmed: boolean;
+  region: { startMs: number; endMs: number };
 }
 
 export interface ExportOptions {

@@ -11,6 +11,7 @@ import {
   songDir,
 } from './paths';
 import type { Project, SongIndex, SongIndexEntry } from '../chart/types';
+import { migrateProject } from '../chart/migrate';
 import { writeChart } from '../chart/writeChart';
 
 /**
@@ -176,7 +177,9 @@ export function newSongId(): string {
 export async function readProject(id: string): Promise<Project | null> {
   try {
     const raw = await fs.readFile(projectFile(id), 'utf8');
-    return JSON.parse(raw) as Project;
+    // Migrate on read: a project.json can predate any field added since it was written,
+    // whether it came from an old install, a backup or a copied folder.
+    return migrateProject(JSON.parse(raw) as Project);
   } catch {
     return null;
   }

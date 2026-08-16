@@ -185,41 +185,89 @@ export async function canTranscodeTo(
  *
  * -q:a 5 is ~160kbps VBR, the quality level the Clone Hero community uses for customs.
  */
-export function spawnOggTranscode(inputPath: string, leadingSilenceMs = 0) {
+export function spawnOggTranscode(inputPath: string, shape: AudioShape = NO_SHAPING) {
   return spawn(
     'ffmpeg',
-    [
-      '-hide_banner',
-      '-loglevel',
-      'error',
-      ...transcodeArgs(inputPath, leadingSilenceMs, 'ogg', 'pipe:1'),
-    ],
+    ['-hide_banner', '-loglevel', 'error', ...transcodeArgs(inputPath, shape, 'ogg', 'pipe:1')],
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
 }
 
 /**
- * ffmpeg arguments for the export transcode, optionally prepending silence.
+ * How the exported audio differs from the uploaded file: a slice of it, with silence
+ * before and after.
  *
- * `adelay` shifts the audio later within the same stream rather than concatenating a
- * separate silent file, which avoids any sample-rate or channel-layout mismatch
- * between the two. `all=1` applies the delay to every channel — without it only the
- * first channel is delayed and the result is audibly out of phase.
+ * All four numbers are in milliseconds of the SOURCE file's timeline, and all four are
+ * already rounded by the caller. Rounding here as well would let the packaged audio and
+ * song.ini's song_length disagree by a millisecond, which is the kind of drift that is
+ * impossible to find by ear and trivial to avoid by construction.
+ */
+export interface AudioShape {
+  leadingSilenceMs: number;
+  trailingSilenceMs: number;
+  /** Where to start reading the source file. */
+  startMs: number;
+  /** Where to stop, or null to read to the end. */
+  endMs: number | null;
+}
+
+export const NO_SHAPING: AudioShape = {
+  leadingSilenceMs: 0,
+  trailingSilenceMs: 0,
+  startMs: 0,
+  endMs: null,
+};
+
+/**
+ * ffmpeg arguments for the export transcode: cut the region, prepend the lead-in, append
+ * the tail.
+ *
+ * ORDER MATTERS, in two ways that are easy to get wrong.
+ *
+ * The cut uses `-ss`/`-to` placed AFTER `-i`, not before. Before the input they seek by
+ * keyframe, which is fast but lands on the nearest frame boundary — for a charted region
+ * that is an arbitrary error of up to a frame, permanently offsetting the chart from the
+ * music. After the input ffmpeg decodes and cuts at the exact sample. Slower, and correct,
+ * and correctness is the entire point of letting someone pick a region by ear.
+ *
+ * `-to` is then relative to the same origin as `-ss`, so it is passed as an absolute
+ * position in the source file, matching how the region is stored.
+ *
+ * The filters run in the order given: `adelay` first (silence before the music), `apad`
+ * second (silence after it). `all=1` on adelay applies the delay to every channel —
+ * without it only the first channel moves and the result is audibly out of phase.
  */
 function transcodeArgs(
   inputPath: string,
-  leadingSilenceMs: number,
+  shape: AudioShape,
   format: ExportAudioFormat,
   destination: string,
 ): string[] {
   const args = ['-i', inputPath, '-vn']; // -vn drops embedded art, which would break the file
-  if (leadingSilenceMs > 0) {
-    args.push('-af', `adelay=${Math.round(leadingSilenceMs)}:all=1`);
+
+  if (shape.startMs > 0) args.push('-ss', msToTimestamp(shape.startMs));
+  if (shape.endMs !== null && shape.endMs > shape.startMs) {
+    args.push('-to', msToTimestamp(shape.endMs));
   }
+
+  const filters: string[] = [];
+  if (shape.leadingSilenceMs > 0) {
+    filters.push(`adelay=${Math.round(shape.leadingSilenceMs)}:all=1`);
+  }
+  if (shape.trailingSilenceMs > 0) {
+    filters.push(`apad=pad_dur=${(shape.trailingSilenceMs / 1000).toFixed(3)}`);
+  }
+  if (filters.length > 0) args.push('-af', filters.join(','));
+
   args.push(...CODEC[format], '-f', format);
   if (destination !== 'pipe:1') args.push('-y');
   args.push(destination);
   return args;
+}
+
+/** Milliseconds as an ffmpeg timestamp, at millisecond precision. */
+function msToTimestamp(ms: number): string {
+  return (Math.max(0, ms) / 1000).toFixed(3);
 }
 
 /**
@@ -235,39 +283,38 @@ export async function transcodeToFile(
   inputPath: string,
   outputPath: string,
   format: ExportAudioFormat,
-  leadingSilenceMs = 0,
+  shape: AudioShape = NO_SHAPING,
 ): Promise<void> {
   await run('ffmpeg', [
     '-hide_banner',
     '-loglevel',
     'error',
-    ...transcodeArgs(inputPath, leadingSilenceMs, format, outputPath),
+    ...transcodeArgs(inputPath, shape, format, outputPath),
   ]);
 }
 
 /**
- * Prepend silence to an audio file without transcoding to OGG, for the
+ * Shape an audio file — cut, delay, pad — without changing its codec, for the
  * keep-original-audio export path. Returns the child process so the caller can pipe
  * stdout into the archive.
  */
-export function spawnSilencePad(inputPath: string, leadingSilenceMs: number, format: string) {
-  return spawn(
-    'ffmpeg',
-    [
-      '-hide_banner',
-      '-loglevel',
-      'error',
-      '-i',
-      inputPath,
-      '-vn',
-      '-af',
-      `adelay=${Math.round(leadingSilenceMs)}:all=1`,
-      '-f',
-      format,
-      'pipe:1',
-    ],
-    { stdio: ['ignore', 'pipe', 'pipe'] },
-  );
+export function spawnSilencePad(inputPath: string, shape: AudioShape, format: string) {
+  const args = ['-i', inputPath, '-vn'];
+  if (shape.startMs > 0) args.push('-ss', msToTimestamp(shape.startMs));
+  if (shape.endMs !== null && shape.endMs > shape.startMs) {
+    args.push('-to', msToTimestamp(shape.endMs));
+  }
+  const filters: string[] = [];
+  if (shape.leadingSilenceMs > 0) filters.push(`adelay=${Math.round(shape.leadingSilenceMs)}:all=1`);
+  if (shape.trailingSilenceMs > 0) {
+    filters.push(`apad=pad_dur=${(shape.trailingSilenceMs / 1000).toFixed(3)}`);
+  }
+  if (filters.length > 0) args.push('-af', filters.join(','));
+  args.push('-f', format, 'pipe:1');
+
+  return spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', ...args], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
 }
 
 function run(command: string, args: string[]): Promise<string> {
