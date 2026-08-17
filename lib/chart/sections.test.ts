@@ -47,6 +47,18 @@ describe('readSections', () => {
     const mixed = [...events([[0, 'Intro']]), { tick: 96, text: 'lighting (flare)' }];
     expect(readSections(mixed)).toHaveLength(1);
   });
+
+  it('ends a section EXCLUSIVELY, at the next marker’s own tick', () => {
+    /**
+     * The boundary convention, pinned because both conventions are defensible and mixing
+     * them is an off-by-one that hides. `endTick` is the next section's first tick, NOT
+     * the last tick of this one — so a half-open range [tick, endTick) is this section,
+     * and any consumer wanting an inclusive range must subtract one. `copySection` and
+     * `selectByLane` below both use the half-open form.
+     */
+    const [intro] = readSections(events([[0, 'Intro'], [768, 'Verse']]));
+    expect(intro.endTick).toBe(768);
+  });
 });
 
 describe('nextSectionName', () => {

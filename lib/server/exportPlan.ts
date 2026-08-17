@@ -280,6 +280,22 @@ export function audioShapeOf(plan: ExportPlan): AudioShape {
   };
 }
 
+/**
+ * song.ini for a plan.
+ *
+ * Both export routes call this rather than each building the options themselves. They used
+ * to, and they disagreed: the zip omitted the music duration, so the same chart downloaded
+ * as an archive and file-by-file carried different `diff_guitar` values.
+ */
+export function songIniFor(plan: ExportPlan): string {
+  return generateSongIni(exportProjectFor(plan), {
+    durationMs: plan.durationMs,
+    // The music alone, so the difficulty estimate is notes per second of PLAYING rather
+    // than notes per second of a file that is partly silence and partly unused audio.
+    musicDurationMs: Math.max(0, plan.region.endMs - plan.region.startMs),
+  });
+}
+
 /** What a single requested filename resolves to. */
 export type ExportFile =
   | { kind: 'text'; body: string; contentType: string }
@@ -322,12 +338,7 @@ export function resolveExportFile(
   if (name === 'song.ini') {
     return {
       kind: 'text',
-      body: generateSongIni(exportProjectFor(plan), {
-        durationMs: plan.durationMs,
-        // The music alone, so the difficulty estimate is notes per second of PLAYING
-        // rather than notes per second of a file that is mostly silence or unused audio.
-        musicDurationMs: Math.max(0, plan.region.endMs - plan.region.startMs),
-      }),
+      body: songIniFor(plan),
       contentType: 'text/plain; charset=utf-8',
     };
   }

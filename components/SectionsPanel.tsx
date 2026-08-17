@@ -206,7 +206,10 @@ export default function SectionsPanel({
                 <button
                   type="button"
                   className="shrink-0 border border-edge2 px-1 text-faint hover:text-fg"
-                  onClick={() => onSelectSection(section.tick, section.endTick, section.name)}
+                  // `endTick` is EXCLUSIVE — it is the next marker's tick — while the
+                  // range selection is inclusive at both ends. Without the -1, selecting a
+                  // section also grabs the first note of the one after it.
+                  onClick={() => onSelectSection(section.tick, section.endTick - 1, section.name)}
                   title={`Select every note in "${section.name}"`}
                 >
                   Select

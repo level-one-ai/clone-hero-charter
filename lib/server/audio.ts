@@ -222,20 +222,30 @@ export const NO_SHAPING: AudioShape = {
  * ffmpeg arguments for the export transcode: cut the region, prepend the lead-in, append
  * the tail.
  *
- * ORDER MATTERS, in two ways that are easy to get wrong.
+ * ALL THREE OPERATIONS ARE FILTERS, IN ONE CHAIN, IN THIS ORDER. That is not a style
+ * preference — the two obvious alternatives are both wrong, and both were measured rather
+ * than reasoned about:
  *
- * The cut uses `-ss`/`-to` placed AFTER `-i`, not before. Before the input they seek by
- * keyframe, which is fast but lands on the nearest frame boundary — for a charted region
- * that is an arbitrary error of up to a frame, permanently offsetting the chart from the
- * music. After the input ffmpeg decodes and cuts at the exact sample. Slower, and correct,
- * and correctness is the entire point of letting someone pick a region by ear.
+ *   - `-ss`/`-to` placed AFTER `-i` are OUTPUT options, which ffmpeg implements as a trim
+ *     appended to the END of the filter chain. They therefore cut the already-delayed and
+ *     padded stream: the lead-in silence is eaten and the music starts early. Asking for a
+ *     30s region with 4s of lead-in and 1s of tail produced a 30s file with no silence at
+ *     either end.
+ *   - `-ss`/`-t` placed BEFORE `-i` are input options and do give the right length, but
+ *     they seek. On a compressed source the seek lands on a frame boundary: an MP3 cut at
+ *     60s started its music 10.6ms late. That is a fixed offset between chart and music for
+ *     the whole song — exactly the failure a region is supposed not to have.
  *
- * `-to` is then relative to the same origin as `-ss`, so it is passed as an absolute
- * position in the source file, matching how the region is stored.
+ * `atrim` inside the chain cuts at the exact sample on both WAV and MP3. It costs a decode
+ * from the start of the file rather than a seek, which for a song-length upload is a cheap
+ * price for being right.
  *
- * The filters run in the order given: `adelay` first (silence before the music), `apad`
- * second (silence after it). `all=1` on adelay applies the delay to every channel —
- * without it only the first channel moves and the result is audibly out of phase.
+ * `asetpts` after the trim rebases timestamps to zero. Without it the trimmed audio keeps
+ * its original presentation times and `adelay` adds the lead-in on top of those, leaving
+ * the region's own start offset in the output as well.
+ *
+ * `all=1` on adelay applies the delay to every channel — without it only the first channel
+ * moves and the result is audibly out of phase.
  */
 export function transcodeArgs(
   inputPath: string,
@@ -245,24 +255,40 @@ export function transcodeArgs(
 ): string[] {
   const args = ['-i', inputPath, '-vn']; // -vn drops embedded art, which would break the file
 
-  if (shape.startMs > 0) args.push('-ss', msToTimestamp(shape.startMs));
-  if (shape.endMs !== null && shape.endMs > shape.startMs) {
-    args.push('-to', msToTimestamp(shape.endMs));
-  }
-
-  const filters: string[] = [];
-  if (shape.leadingSilenceMs > 0) {
-    filters.push(`adelay=${Math.round(shape.leadingSilenceMs)}:all=1`);
-  }
-  if (shape.trailingSilenceMs > 0) {
-    filters.push(`apad=pad_dur=${(shape.trailingSilenceMs / 1000).toFixed(3)}`);
-  }
+  const filters = shapeFilters(shape);
   if (filters.length > 0) args.push('-af', filters.join(','));
 
   args.push(...CODEC[format], '-f', format);
   if (destination !== 'pipe:1') args.push('-y');
   args.push(destination);
   return args;
+}
+
+/**
+ * The filter chain for a shape: trim, rebase, delay, pad — in that order, always.
+ *
+ * Shared by the transcode and the keep-original-codec path so the two cannot drift apart.
+ * An export that is correct as WAV and wrong as OGG would be a miserable thing to find.
+ */
+export function shapeFilters(shape: AudioShape): string[] {
+  const filters: string[] = [];
+
+  const hasEnd = shape.endMs !== null && shape.endMs > shape.startMs;
+  if (shape.startMs > 0 || hasEnd) {
+    const parts = [`start=${msToTimestamp(shape.startMs)}`];
+    if (hasEnd) parts.push(`end=${msToTimestamp(shape.endMs as number)}`);
+    filters.push(`atrim=${parts.join(':')}`);
+    filters.push('asetpts=N/SR/TB');
+  }
+
+  if (shape.leadingSilenceMs > 0) {
+    filters.push(`adelay=${Math.round(shape.leadingSilenceMs)}:all=1`);
+  }
+  if (shape.trailingSilenceMs > 0) {
+    filters.push(`apad=pad_dur=${(shape.trailingSilenceMs / 1000).toFixed(3)}`);
+  }
+
+  return filters;
 }
 
 /** Milliseconds as an ffmpeg timestamp, at millisecond precision. */
@@ -300,15 +326,8 @@ export async function transcodeToFile(
  */
 export function spawnSilencePad(inputPath: string, shape: AudioShape, format: string) {
   const args = ['-i', inputPath, '-vn'];
-  if (shape.startMs > 0) args.push('-ss', msToTimestamp(shape.startMs));
-  if (shape.endMs !== null && shape.endMs > shape.startMs) {
-    args.push('-to', msToTimestamp(shape.endMs));
-  }
-  const filters: string[] = [];
-  if (shape.leadingSilenceMs > 0) filters.push(`adelay=${Math.round(shape.leadingSilenceMs)}:all=1`);
-  if (shape.trailingSilenceMs > 0) {
-    filters.push(`apad=pad_dur=${(shape.trailingSilenceMs / 1000).toFixed(3)}`);
-  }
+  // Same chain as the transcode, for the same reasons — see transcodeArgs.
+  const filters = shapeFilters(shape);
   if (filters.length > 0) args.push('-af', filters.join(','));
   args.push('-f', format, 'pipe:1');
 

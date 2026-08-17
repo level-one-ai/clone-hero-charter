@@ -146,11 +146,18 @@ export default function WaveformPanel({
     /**
      * Only ever ONE region exists. Dragging out a second would leave two slices with no
      * way to say which one the chart covers, so a new drag replaces the old selection.
+     *
+     * `region-created` fires for OUR OWN `addRegion` too, not just for a user's drag. Left
+     * unguarded, simply loading a saved project reported its stored region back as a fresh
+     * edit — which announced a selection nobody made, marked the detector's alignment as
+     * overridden, and dirtied the project into an autosave on open. `applyingProp` marks
+     * the writes we perform ourselves so only real drags are reported.
      */
     regions.on('region-created', (created: Region) => {
       for (const existing of regions.getRegions()) {
         if (existing.id !== created.id) existing.remove();
       }
+      if (applyingProp.current) return;
       callbacks.current.onRegionChange({ startSec: created.start, endSec: created.end }, true);
     });
     regions.on('region-update', (updated: Region) => {
@@ -193,6 +200,8 @@ export default function WaveformPanel({
    * would fight the plugin for control of the same rectangle and make the edge stutter.
    */
   const draggingRef = useRef(false);
+  /** True while this component is writing the prop onto the waveform, not the user. */
+  const applyingProp = useRef(false);
   useEffect(() => {
     const regions = regionsRef.current;
     if (!regions || loading || draggingRef.current) return;
@@ -207,14 +216,22 @@ export default function WaveformPanel({
     if (current && Math.abs(current.start - region.startSec) < 0.001 && Math.abs(current.end - region.endSec) < 0.001) {
       return;
     }
-    for (const item of existing) item.remove();
-    regions.addRegion({
-      start: region.startSec,
-      end: region.endSec,
-      color: REGION_COLOR,
-      drag: true,
-      resize: true,
-    });
+
+    applyingProp.current = true;
+    try {
+      for (const item of existing) item.remove();
+      regions.addRegion({
+        start: region.startSec,
+        end: region.endSec,
+        color: REGION_COLOR,
+        drag: true,
+        resize: true,
+      });
+    } finally {
+      // The plugin emits `region-created` synchronously from addRegion, so clearing the
+      // flag here is enough — no timeout, and no window in which a real drag is missed.
+      applyingProp.current = false;
+    }
   }, [region, loading]);
 
   const markDragging = useCallback((value: boolean) => {

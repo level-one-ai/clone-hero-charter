@@ -875,8 +875,11 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
    * have to go looking for is one you ship.
    */
   const chartIssues = useMemo(
-    () => validateChart(project, { durationMs: project.audio.durationMs }),
-    [project],
+    // Measured against CHART time — lead-in plus region — not the source file's length.
+    // The upload may be far longer than the charted section, or shorter than chart time
+    // once a lead-in is added, and either way it is the wrong yardstick for "past the end".
+    () => validateChart(project, { durationMs: timeline.musicEndSec * 1000 }),
+    [project, timeline.musicEndSec],
   );
   const issueCount = chartIssues.length;
   const hasErrors = useMemo(() => countBySeverity(chartIssues).errors > 0, [chartIssues]);
@@ -1562,7 +1565,7 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
                   defaultOpen={issueCount > 0}
                 >
                   <ChartCheckPanel
-                    project={project}
+                    issues={chartIssues}
                     onSeekToTick={(tick) => handleSeek(timing.tickToSec(tick))}
                   />
                 </Disclosure>

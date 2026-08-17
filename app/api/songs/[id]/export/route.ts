@@ -1,7 +1,6 @@
 import archiver from 'archiver';
 import { Readable } from 'node:stream';
 import { NextResponse } from 'next/server';
-import { generateSongIni } from '@/lib/chart/songIni';
 import { writeMidi } from '@/lib/chart/writeMidi';
 import { writeChart } from '@/lib/chart/writeChart';
 import { isValidSongId } from '@/lib/server/paths';
@@ -12,6 +11,7 @@ import {
   exportProjectFor,
   planExport,
   prepareExportAudio,
+  songIniFor,
   type ChartFormat,
   type ExportPlan,
 } from '@/lib/server/exportPlan';
@@ -72,7 +72,7 @@ interface Params {
  */
 
 async function buildArchive(id: string, plan: ExportPlan): Promise<Response> {
-  const { folderName, audioExt, audioFormat, canTranscode, durationMs, warnings } = plan;
+  const { folderName, audioExt, audioFormat, canTranscode, warnings } = plan;
   const project = plan.project;
 
   const archive = archiver('zip', {
@@ -83,8 +83,8 @@ async function buildArchive(id: string, plan: ExportPlan): Promise<Response> {
 
   // ---- the chart ------------------------------------------------------------------
   // Regenerated from the current project rather than read off disk, so an export can
-  // never ship a stale chart. exportProjectFor folds the lead-in into Offset — see its
-  // comment for why that beats moving ticks.
+  // never ship a stale chart. Ticks and Offset are shipped exactly as charted — the
+  // lead-in is real silence in the audio, not an adjustment to either.
   const exportProject = exportProjectFor(plan);
   if (plan.chartFormat === 'mid') {
     const midi = writeMidi(exportProject);
@@ -97,9 +97,8 @@ async function buildArchive(id: string, plan: ExportPlan): Promise<Response> {
   }
 
   // ---- song.ini -----------------------------------------------------------------
-  archive.append(generateSongIni(exportProject, { durationMs }), {
-    name: `${folderName}/song.ini`,
-  });
+  // Built by the plan, not here, so the zip and the per-file download cannot disagree.
+  archive.append(songIniFor(plan), { name: `${folderName}/song.ini` });
 
   // ---- audio --------------------------------------------------------------------
   // Any conversion happens BEFORE the archive starts, so a failure here still returns a

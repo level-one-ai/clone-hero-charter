@@ -15,42 +15,54 @@ function shape(overrides: Partial<AudioShape> = {}): AudioShape {
 }
 
 describe('transcodeArgs', () => {
-  it('cuts AFTER the input, so the seek is sample-accurate', () => {
+  it('never cuts with -ss or -to, which would trim the silence back off', () => {
     /**
-     * The one that matters most. `-ss` before `-i` seeks by keyframe — fast, and it lands
-     * on the nearest frame boundary, which for a charted region is an arbitrary error of
-     * up to a frame that offsets the chart from the music forever. After `-i`, ffmpeg
-     * decodes and cuts at the exact sample.
+     * The one that matters most, and it was got wrong first time round.
+     *
+     * `-ss`/`-to` after `-i` are OUTPUT options: ffmpeg appends them to the END of the
+     * filter chain, so they cut the already-delayed and padded stream rather than the
+     * source. Measured with ffmpeg 7: a 30s region with 4s of lead-in and 1s of tail came
+     * out as a 30s file with no silence at either end, and the music four seconds early.
+     *
+     * `-ss` before `-i` gives the right length but seeks to a frame boundary — an MP3 cut
+     * at 60s started 10.6ms late, a fixed chart-to-music offset for the whole song.
      */
-    const args = transcodeArgs('in.mp3', shape({ startMs: 60_000 }), 'wav', 'out.wav');
-    const inputIndex = args.indexOf('-i');
-    const seekIndex = args.indexOf('-ss');
-    expect(seekIndex).toBeGreaterThan(inputIndex);
-  });
-
-  it('expresses the region as absolute positions in the source file', () => {
     const args = transcodeArgs('in.mp3', shape({ startMs: 60_000, endMs: 90_000 }), 'wav', 'out.wav');
-    expect(args[args.indexOf('-ss') + 1]).toBe('60.000');
-    // -to shares an origin with -ss, so it is the region's end, not its length.
-    expect(args[args.indexOf('-to') + 1]).toBe('90.000');
+    expect(args).not.toContain('-ss');
+    expect(args).not.toContain('-to');
+    expect(args).not.toContain('-t');
   });
 
-  it('keeps millisecond precision in the timestamps', () => {
+  it('cuts with atrim inside the chain, at absolute positions in the source', () => {
+    const args = transcodeArgs('in.mp3', shape({ startMs: 60_000, endMs: 90_000 }), 'wav', 'out.wav');
+    expect(args[args.indexOf('-af') + 1]).toContain('atrim=start=60.000:end=90.000');
+  });
+
+  it('rebases timestamps after trimming', () => {
+    // Without asetpts the trimmed audio keeps its original presentation times, and adelay
+    // adds the lead-in on top of them — leaving the region's start offset in the output.
+    const args = transcodeArgs('in.mp3', shape({ startMs: 60_000, endMs: 90_000 }), 'wav', 'out.wav');
+    const filters = args[args.indexOf('-af') + 1];
+    expect(filters.indexOf('asetpts')).toBeGreaterThan(filters.indexOf('atrim'));
+  });
+
+  it('keeps millisecond precision in the cut', () => {
     const args = transcodeArgs('in.mp3', shape({ startMs: 60_123 }), 'wav', 'out.wav');
-    expect(args[args.indexOf('-ss') + 1]).toBe('60.123');
+    expect(args[args.indexOf('-af') + 1]).toContain('start=60.123');
   });
 
-  it('delays before it pads, so silence lands on the right end', () => {
-    // Filters run in the order given: the lead-in has to come before the music and the
-    // tail after it. Reversed, the file would be padded and then the whole thing delayed.
+  it('trims, then delays, then pads', () => {
+    // The whole order in one assertion: cut the region out, put silence in front of it,
+    // put silence behind it. Any other order produces a different file.
     const args = transcodeArgs(
       'in.mp3',
-      shape({ leadingSilenceMs: 4000, trailingSilenceMs: 2000 }),
+      shape({ startMs: 60_000, endMs: 90_000, leadingSilenceMs: 4000, trailingSilenceMs: 2000 }),
       'wav',
       'out.wav',
     );
-    const filters = args[args.indexOf('-af') + 1];
-    expect(filters).toBe('adelay=4000:all=1,apad=pad_dur=2.000');
+    expect(args[args.indexOf('-af') + 1]).toBe(
+      'atrim=start=60.000:end=90.000,asetpts=N/SR/TB,adelay=4000:all=1,apad=pad_dur=2.000',
+    );
   });
 
   it('delays every channel, not just the first', () => {
@@ -65,14 +77,13 @@ describe('transcodeArgs', () => {
 
   it('omits the cut when the whole file is wanted', () => {
     const args = transcodeArgs('in.wav', shape({ leadingSilenceMs: 1000 }), 'wav', 'out.wav');
-    expect(args).not.toContain('-ss');
-    expect(args).not.toContain('-to');
+    expect(args[args.indexOf('-af') + 1]).toBe('adelay=1000:all=1');
   });
 
   it('ignores an end that is not after the start', () => {
-    // An inverted region would otherwise ask ffmpeg for a negative duration.
+    // An inverted region would otherwise ask ffmpeg for a negative-length trim.
     const args = transcodeArgs('in.wav', shape({ startMs: 5000, endMs: 1000 }), 'wav', 'out.wav');
-    expect(args).not.toContain('-to');
+    expect(args[args.indexOf('-af') + 1]).toBe('atrim=start=5.000,asetpts=N/SR/TB');
   });
 
   it('drops video, which would otherwise break the packaged file', () => {

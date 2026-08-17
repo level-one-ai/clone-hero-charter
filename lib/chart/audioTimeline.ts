@@ -95,6 +95,15 @@ export interface AudioTimeline {
   trailingSec: number;
   /** Lead-in + region + trailing: the full length of the exported song. */
   totalSec: number;
+  /**
+   * Chart time at which the music stops — lead-in plus region, without the tail.
+   *
+   * This, not the source file's length, is what "after the end of the audio" means for a
+   * chart. The uploaded file may be far longer than the charted region, or shorter than
+   * chart time once a lead-in is added; measuring against it flags notes that are fine and
+   * misses notes that are genuinely unreachable.
+   */
+  musicEndSec: number;
   /** True when the region is a genuine slice rather than the whole file. */
   trimmed: boolean;
   /** Chart seconds -> position in the source audio file. */
@@ -123,6 +132,7 @@ export function buildAudioTimeline(project: Project, timing: TimingMap): AudioTi
     regionSec,
     trailingSec,
     totalSec: leadInSec + regionSec + trailingSec,
+    musicEndSec: leadInSec + regionSec,
     trimmed: region.startMs > 0 || region.endMs < (project.audio.durationMs || 0) - 1,
     chartToAudio: (chartSec: number) => chartSec + shift,
     audioToChart: (audioSec: number) => audioSec - shift,
