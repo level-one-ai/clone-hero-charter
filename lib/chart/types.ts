@@ -126,30 +126,106 @@ export interface SongMeta {
    */
   offset: number;
   /**
-   * Silence to prepend to the audio, in milliseconds.
+   * Silence before the music, measured in BARS AND BEATS rather than milliseconds.
    *
-   * Charting against a song that starts immediately is awkward: there is no room to
-   * get your bearings, and the first notes are hard to line up. Adding a lead-in
-   * shifts the whole song later without touching a single note.
+   * Charting against a song that starts immediately is awkward: there is no room to get
+   * your bearings, and the first notes are hard to line up. So every chart gets a lead-in,
+   * and it is expressed in musical units for one reason — a lead-in of "2 bars" ends
+   * exactly on a downbeat at any tempo, where "1.8 seconds" lands wherever it lands and
+   * puts the first beat of the song off the grid forever after.
    *
    * THE MUSIC MOVES, THE NOTES STAY PUT. Tick 0 is the start of the silence, so the
-   * highway gains empty space before the first beat — which is the whole point when a
-   * song starts too fast to chart its opening. `offset` is deliberately NOT adjusted:
-   * the export prepends real silence with ffmpeg, so the padded file's timeline already
-   * IS chart time, and adding the lead-in to offset as well would cancel the pad out.
+   * highway gains empty bars before the first beat. `offset` is deliberately NOT
+   * adjusted: the export prepends real silence with ffmpeg, so the padded file's timeline
+   * already IS chart time, and adding the lead-in to offset as well would cancel the pad
+   * out.
    *
    * Non-destructive: the uploaded audio on disk is never modified. The editor previews
    * it by running a silent pre-roll before handing over to the audio element, so what
    * you hear against the highway is what the game plays.
    */
-  leadingSilenceMs: number;
+  leadIn: LeadIn;
+  /**
+   * Silence appended after the audio region, in milliseconds.
+   *
+   * Exists for charting a section out of a longer recording: a live set or an album rip
+   * runs straight into the next track, so a region that ends on the last chord ends
+   * abruptly. Padding the tail gives the chart somewhere to finish.
+   */
+  trailingSilenceMs: number;
+}
+
+/**
+ * Lead-in length in musical units, counted from tick 0.
+ *
+ * `bars` is the whole-bar count and `beats` the remainder, both measured against the time
+ * signature in force at tick 0. Total, not "extra": a lead-in of 2 bars 0 beats IS the
+ * enforced minimum, and 3 bars 2 beats is that minimum plus a bar and two beats.
+ */
+export interface LeadIn {
+  bars: number;
+  beats: number;
+}
+
+/**
+ * Every chart gets at least this many bars of silence before the music.
+ *
+ * Two bars is a full count-in: enough to read the approach of the first note and get a
+ * hand to the frets, which songs that open on beat one otherwise never give you.
+ */
+export const MIN_LEAD_IN_BARS = 2;
+
+/**
+ * Trailing silence added by default, in milliseconds.
+ *
+ * Two seconds is enough that a chart cut out of a continuous recording does not end on
+ * the first note of whatever came next.
+ */
+export const DEFAULT_TRAILING_SILENCE_MS = 2000;
+
+/**
+ * The slice of the uploaded audio that this chart covers.
+ *
+ * Null means the whole file. A region is how you chart one song out of a long upload — a
+ * full album side, a live set, a practice recording — without cutting the source up
+ * first. It is purely a view onto the file: the upload on disk is never modified, and
+ * changing the region re-aims the chart rather than destroying anything.
+ *
+ * `startMs` doubles as the SYNC ANCHOR. Chart time runs: lead-in silence, then the region
+ * from `startMs`, then the trailing silence. So placing `startMs` on the first downbeat of
+ * the music is what makes bar 1 of the chart land on bar 1 of the recording.
+ */
+export interface AudioRegion {
+  /** Offset into the source file where the charted audio begins, in ms. */
+  startMs: number;
+  /** Offset into the source file where it ends, in ms. Exclusive. */
+  endMs: number;
 }
 
 export interface AudioInfo {
   /** Filename within the song folder, e.g. "audio.wav". */
   file: string;
+  /** Length of the SOURCE file, not of the charted region. */
   durationMs: number;
   sampleRate: number | null;
+  /** Charted slice of the source file, or null for all of it. */
+  region?: AudioRegion | null;
+  /**
+   * Tempo detection result for this file, kept so the UI can show what it found and
+   * whether the anchor BPM came from analysis or from a person. Null until analysed.
+   */
+  detected?: DetectedTempo | null;
+}
+
+/** What beat detection made of the audio. Advisory: the charter always gets the last word. */
+export interface DetectedTempo {
+  bpm: number;
+  /** Seconds into the SOURCE file where the first detected beat falls. */
+  firstBeatSec: number;
+  /** 0-1. Below ~0.5 the UI says so rather than quietly trusting it. */
+  confidence: number;
+  /** True once the charter has moved the anchor or the region themselves. */
+  overridden?: boolean;
 }
 
 export interface Project {
@@ -229,11 +305,12 @@ export function createEmptyProject(id: string, meta: Partial<SongMeta> = {}): Pr
       charter: '',
       mediaType: 'cd',
       offset: 0,
-      leadingSilenceMs: 0,
+      leadIn: { bars: MIN_LEAD_IN_BARS, beats: 0 },
+      trailingSilenceMs: DEFAULT_TRAILING_SILENCE_MS,
       ...meta,
     },
     resolution: DEFAULT_RESOLUTION,
-    audio: { file: '', durationMs: 0, sampleRate: null },
+    audio: { file: '', durationMs: 0, sampleRate: null, region: null, detected: null },
     album: null,
     sync: {
       bpms: [{ tick: 0, bpm: 120 }],

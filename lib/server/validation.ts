@@ -1,5 +1,11 @@
 import { z } from 'zod';
-import { TRACK_NAMES, type Project } from '../chart/types';
+import {
+  DEFAULT_TRAILING_SILENCE_MS,
+  MIN_LEAD_IN_BARS,
+  TRACK_NAMES,
+  type Project,
+} from '../chart/types';
+import { normalizeLeadIn, resolveRegion } from '../chart/audioTimeline';
 
 /**
  * Request validation for the chart-save endpoint.
@@ -75,14 +81,41 @@ export const projectSchema = z.object({
     charter: z.string().max(120),
     mediaType: z.string().max(60),
     offset: z.number().min(-600).max(600),
-    // Up to a minute of lead-in; beyond that it is a mistake, not an intention.
-    leadingSilenceMs: z.number().min(0).max(60_000).default(0),
+    /**
+     * Lead-in in bars and beats. The 2-bar floor is applied in normalizeProject rather
+     * than here so an out-of-range value is repaired instead of failing the whole save —
+     * losing an autosave over a lead-in field would cost real work.
+     */
+    leadIn: z
+      .object({
+        // 64 bars is already absurd as a count-in; past that it is a typo.
+        bars: z.number().int().min(0).max(64).default(MIN_LEAD_IN_BARS),
+        beats: z.number().int().min(0).max(64).default(0),
+      })
+      .default({ bars: MIN_LEAD_IN_BARS, beats: 0 }),
+    trailingSilenceMs: z.number().min(0).max(30_000).default(DEFAULT_TRAILING_SILENCE_MS),
   }),
   resolution: z.number().int().min(1).max(19200),
   audio: z.object({
     file: z.string().max(260),
     durationMs: z.number().min(0).max(24 * 60 * 60 * 1000),
     sampleRate: z.number().int().min(0).max(768_000).nullable(),
+    region: z
+      .object({
+        startMs: z.number().min(0).max(24 * 60 * 60 * 1000),
+        endMs: z.number().min(0).max(24 * 60 * 60 * 1000),
+      })
+      .nullable()
+      .default(null),
+    detected: z
+      .object({
+        bpm: z.number().min(1).max(1000),
+        firstBeatSec: z.number().min(0).max(24 * 60 * 60),
+        confidence: z.number().min(0).max(1),
+        overridden: z.boolean().optional(),
+      })
+      .nullable()
+      .default(null),
   }),
   album: z.string().max(260).nullable(),
   sync: z.object({
@@ -123,6 +156,18 @@ export function normalizeProject(input: z.infer<typeof projectSchema>): Project 
     timeSignatures.unshift({ tick: 0, numerator: 4, denominator: 4 });
   }
   project.sync.timeSignatures = timeSignatures;
+
+  // The 2-bar minimum is enforced HERE, at the persistence boundary, not only in the UI.
+  // A chart saved by an older client, a scripted write or a hand-edited file still comes
+  // out with a playable count-in, which is the point of calling it a minimum.
+  project.meta.leadIn = normalizeLeadIn(project.meta.leadIn, timeSignatures[0].numerator);
+
+  // A region that starts past its end, or past the file, would produce an empty export.
+  // resolveRegion repairs both, and a region covering the whole file is stored as null so
+  // "no region" has exactly one representation.
+  const region = resolveRegion(project.audio);
+  project.audio.region =
+    region.startMs <= 0 && region.endMs >= (project.audio.durationMs || 0) ? null : region;
 
   project.events = [...project.events].sort((a, b) => a.tick - b.tick);
 

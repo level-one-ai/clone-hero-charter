@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { isValidSongId } from '@/lib/server/paths';
 import { readProject, saveProject } from '@/lib/server/storage';
 import { normalizeProject, projectSchema } from '@/lib/server/validation';
+import { resolveRegion } from '@/lib/chart/audioTimeline';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -78,8 +79,35 @@ export async function PUT(request: Request, { params }: Params) {
   const project = normalizeProject(parsed.data);
   project.id = id;
   project.revision = storedRevision;
-  // Audio identity and duration are server-measured facts, not client opinions.
-  project.audio = existing.audio;
+  /**
+   * The audio block holds two different kinds of thing, and they are treated differently.
+   *
+   * The filename, duration and sample rate are SERVER-MEASURED FACTS about a file on
+   * disk; a client cannot know better and must not be able to overwrite them. The region
+   * and the detection result are CHARTER DECISIONS made in the editor, and taking those
+   * from the stored copy would mean they could never be saved at all.
+   *
+   * They live together because they describe the same file. Keeping the split explicit
+   * here is what lets both be true.
+   */
+  const merged = {
+    ...existing.audio,
+    region: project.audio.region ?? null,
+    detected: project.audio.detected ?? null,
+  };
+  /**
+   * Re-clamp against the SERVER's duration, not the one the request carried.
+   * normalizeProject already bounded the region, but it did so using the client's
+   * `durationMs` — which we have just discarded in favour of the measured value. A
+   * request claiming a longer file could otherwise store a region running past the end of
+   * the real one.
+   */
+  const bounded = resolveRegion(merged);
+  project.audio = {
+    ...merged,
+    region:
+      bounded.startMs <= 0 && bounded.endMs >= (merged.durationMs || 0) ? null : bounded,
+  };
   project.album = existing.album;
 
   let stored;

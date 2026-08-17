@@ -13,17 +13,32 @@ import ReimportDialog from './ReimportDialog';
 import SongPropertiesPanel from './SongPropertiesPanel';
 import SyncPanel from './SyncPanel';
 import TransportBar from './TransportBar';
-import WaveformPanel, { type WaveformHandle } from './WaveformPanel';
-import { TimingMap } from '@/lib/chart/timing';
+import WaveformPanel, { type RegionSelection, type WaveformHandle } from './WaveformPanel';
+import { TimingMap, formatTime } from '@/lib/chart/timing';
+import {
+  buildAudioTimeline,
+  leadInTicks,
+  normalizeLeadIn,
+} from '@/lib/chart/audioTimeline';
+import {
+  detectTempo,
+  regionStartForFirstBeat,
+  type GuessFn,
+  type TempoGuess,
+} from '@/lib/editor/tempoDetect';
 import { snapTick, type SnapDivision } from '@/lib/chart/snap';
 import {
   DIFFICULTIES,
+  LANE_LABELS,
   newNoteId,
   trackNameFor,
   type Difficulty,
   type Lane,
   type Project,
 } from '@/lib/chart/types';
+import { copySection, selectByLane, type Section } from '@/lib/chart/sections';
+import { countBySeverity, validateChart } from '@/lib/chart/validateChart';
+import Disclosure from './Disclosure';
 import { sustainSelectionToNext } from '@/lib/chart/sustain';
 import { convertNotes, selectByType, type NoteType } from '@/lib/chart/noteTypes';
 import { Metronome } from '@/lib/editor/metronome';
@@ -70,6 +85,13 @@ import {
 
 const AUTOSAVE_DELAY_MS = 1500;
 
+/** The lead-in in words: "2 bars", "3 bars 2 beats". */
+function describeLeadIn(leadIn: Project['meta']['leadIn']): string {
+  const bars = `${leadIn.bars} bar${leadIn.bars === 1 ? '' : 's'}`;
+  if (!leadIn.beats) return bars;
+  return `${bars} ${leadIn.beats} beat${leadIn.beats === 1 ? '' : 's'}`;
+}
+
 /**
  * Disagreement between the interpolated playhead and the audio element that is absorbed
  * silently rather than snapped. Below roughly one frame at 60Hz nobody can see it, and
@@ -101,9 +123,11 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
   const [exportOpen, setExportOpen] = useState(false);
   const [reimportOpen, setReimportOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [sidebarTab, setSidebarTab] = useState<'song' | 'sync' | 'sections' | 'check'>('sections');
+  const [sidebarTab, setSidebarTab] = useState<'song' | 'sync' | 'sections'>('sections');
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [metronomeOn, setMetronomeOn] = useState(false);
+  /** True while the charter is dragging out the section of a long upload to chart. */
+  const [regionSelecting, setRegionSelecting] = useState(false);
   const metronomeRef = useRef<Metronome | null>(null);
   const [starPowerTool, setStarPowerTool] = useState<StarPowerToolState>(STAR_POWER_TOOL_OFF);
   const clipboardRef = useRef<ClipboardBlock | null>(null);
@@ -137,17 +161,17 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
   /**
    * CHART TIME vs AUDIO TIME.
    *
-   * The editor works in chart seconds. The lead-in pushes the music later, so the audio
-   * file's own timeline sits `leadInSec` behind:
-   *
-   *     chartSeconds = audioSeconds + leadInSec
+   * The editor works in chart seconds. Two things separate that from the audio file's own
+   * timeline: the lead-in silence before the music, and the region — the slice of a longer
+   * upload this chart actually covers. `buildAudioTimeline` owns both conversions, and
+   * every call into wavesurfer goes through it.
    *
    * Everything the user sees — the playhead, the highway, the readout — is chart time.
-   * Only calls into wavesurfer convert back.
    */
-  const leadInSec = project.meta.leadingSilenceMs / 1000;
-  const leadInRef = useRef(leadInSec);
-  leadInRef.current = leadInSec;
+  const timeline = useMemo(() => buildAudioTimeline(project, timing), [project, timing]);
+  const timelineRef = useRef(timeline);
+  timelineRef.current = timeline;
+  const leadInSec = timeline.leadInSec;
 
   const rateRef = useRef(playbackRate);
   rateRef.current = playbackRate;
@@ -186,13 +210,15 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
       cancelPreRoll();
       writeClock(chartSeconds, true, true);
       // Wall-clock delay, so a slower playback rate stretches the silence to match.
-      const delayMs = ((leadInRef.current - chartSeconds) / rateRef.current) * 1000;
+      const delayMs = ((timelineRef.current.leadInSec - chartSeconds) / rateRef.current) * 1000;
       preRollTimer.current = setTimeout(() => {
         preRollTimer.current = null;
         if (!clockRef.current.playing) return;
-        waveformRef.current?.seek(0);
+        // Hand over at the START OF THE REGION, not at zero: with a trimmed upload the
+        // music this chart covers begins partway into the file.
+        waveformRef.current?.seek(timelineRef.current.regionStartSec);
         waveformRef.current?.play();
-        writeClock(leadInRef.current, true, false);
+        writeClock(timelineRef.current.leadInSec, true, false);
       }, Math.max(0, delayMs));
     },
     [cancelPreRoll, writeClock],
@@ -227,7 +253,22 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
        * quantised. So: small disagreements are absorbed silently, and only a real
        * divergence — the kind a dropped frame or a stalled buffer causes — snaps.
        */
-      const chartSeconds = audioSeconds + leadInRef.current;
+      const chartSeconds = timelineRef.current.audioToChart(audioSeconds);
+
+      /**
+       * Stop at the end of the region.
+       *
+       * Past it the file carries whatever came next on the record — the following track,
+       * the next song of a live set — which is precisely what a region exists to exclude.
+       * The export replaces that stretch with silence, so playing it here would be the
+       * editor telling a different story from the file that ships.
+       */
+      if (isPlaying && timelineRef.current.trimmed && audioSeconds >= timelineRef.current.regionEndSec) {
+        waveformRef.current?.pause();
+        writeClock(timelineRef.current.leadInSec + timelineRef.current.regionSec, false, false);
+        return;
+      }
+
       const drift = Math.abs(chartSeconds - currentTime(clockRef.current));
       if (isPlaying && drift < DRIFT_TOLERANCE_SEC) {
         // Absorb: keep the reading as the new anchor so error cannot accumulate, but do
@@ -253,16 +294,17 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
       const wasPlaying = clockRef.current.playing;
       cancelPreRoll();
 
-      if (clamped < leadInRef.current) {
-        // Inside the lead-in: the audio has nothing to play yet, so park it at the start.
+      if (clamped < timelineRef.current.leadInSec) {
+        // Inside the lead-in: the audio has nothing to play yet, so park it at the point
+        // the music will start from.
         waveformRef.current?.pause();
-        waveformRef.current?.seek(0);
+        waveformRef.current?.seek(timelineRef.current.regionStartSec);
         if (wasPlaying) startPreRoll(clamped);
         else writeClock(clamped, false, true);
         return;
       }
 
-      waveformRef.current?.seek(clamped - leadInRef.current);
+      waveformRef.current?.seek(timelineRef.current.chartToAudio(clamped));
       if (wasPlaying) waveformRef.current?.play();
       // Written synchronously so the highway responds on the very next frame rather than
       // waiting for wavesurfer's seek event.
@@ -276,10 +318,10 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
     if (clockRef.current.playing) {
       cancelPreRoll();
       waveformRef.current?.pause();
-      writeClock(chartNow, false, chartNow < leadInRef.current);
+      writeClock(chartNow, false, chartNow < timelineRef.current.leadInSec);
       return;
     }
-    if (chartNow < leadInRef.current) {
+    if (chartNow < timelineRef.current.leadInSec) {
       startPreRoll(chartNow);
       return;
     }
@@ -426,27 +468,140 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
   );
 
   /**
-   * Lead-in drag.
+   * Select notes by colour, scoped to whichever sections are armed.
+   *
+   * With none armed the scope is the whole chart — not a fallback but the same question
+   * asked of a chart that has no structure marked yet.
+   */
+  const handleSelectLanes = useCallback(
+    (lanes: Lane[], sections: Section[]) => {
+      const ids = selectByLane(project.tracks[trackName].notes, lanes, sections);
+      dispatch({ type: 'select', ids });
+      const colours = lanes.map((lane) => LANE_LABELS[lane].toLowerCase()).join(', ');
+      const where = sections.length > 0 ? ` in ${sections.map((s) => s.name).join(', ')}` : '';
+      setMessage({
+        kind: 'info',
+        text:
+          ids.length > 0
+            ? `Selected ${ids.length} ${colours} note${ids.length === 1 ? '' : 's'}${where}.`
+            : `No ${colours} notes${where}.`,
+      });
+    },
+    [project.tracks, trackName],
+  );
+
+  /**
+   * Copy one section's notes onto another, keeping their position within the section.
+   *
+   * One history step: the replacement and the insertion have to undo together, or an undo
+   * would leave the target empty — worse than either state.
+   */
+  const handleCopySection = useCallback(
+    (from: Section, to: Section) => {
+      const result = copySection(project.tracks[trackName].notes, from, to, newNoteId);
+      if (result.notes.length === 0 && result.replacedIds.length === 0) {
+        setMessage({ kind: 'error', text: `"${from.name}" has no notes to copy.` });
+        return;
+      }
+
+      const kept = project.tracks[trackName].notes.filter(
+        (note) => !result.replacedIds.includes(note.id),
+      );
+      dispatch({
+        type: 'replaceTrack',
+        track: trackName,
+        notes: [...kept, ...result.notes].sort((a, b) => a.tick - b.tick || a.lane - b.lane),
+        starPower: project.tracks[trackName].starPower,
+      });
+      dispatch({ type: 'select', ids: result.notes.map((note) => note.id) });
+      handleSeek(timing.tickToSec(to.tick));
+
+      const replaced =
+        result.replacedIds.length > 0 ? `, replacing ${result.replacedIds.length}` : '';
+      const overflow =
+        result.overflowCount > 0
+          ? ` ${result.overflowCount} run past the end of "${to.name}" — its marker may be early.`
+          : '';
+      setMessage({
+        kind: 'info',
+        text: `Copied ${result.notes.length} note${result.notes.length === 1 ? '' : 's'} from "${from.name}" into "${to.name}"${replaced}.${overflow}`,
+      });
+    },
+    [project.tracks, trackName, handleSeek, timing],
+  );
+
+  /**
+   * Set the lead-in, in bars and beats.
+   *
+   * Normalised through the same helper the server uses, so the 2-bar minimum and the
+   * beats-carry-into-bars rule hold wherever the value came from.
+   */
+  const handleLeadInChange = useCallback(
+    (bars: number, beats: number) => {
+      const beatsPerBar = timing.timeSignatureAt(0).numerator;
+      const leadIn = normalizeLeadIn({ bars, beats }, beatsPerBar);
+      dispatch({ type: 'setMeta', meta: { leadIn } });
+    },
+    [timing],
+  );
+
+  /**
+   * Region drag on the waveform.
    *
    * Only the release enters undo history — a drag fires continuously, and one undo step
    * per pixel would bury everything else in the stack. Intermediate values still update
    * the project so the waveform and highway track the drag live.
    */
-  const handleLeadInChange = useCallback(
-    (ms: number, committed: boolean) => {
-      dispatch({ type: 'setMeta', meta: { leadingSilenceMs: ms }, transient: !committed });
-      if (committed) {
+  const handleRegionChange = useCallback(
+    (next: RegionSelection | null, committed: boolean) => {
+      dispatch({
+        type: 'setAudioRegion',
+        region: next ? { startMs: next.startSec * 1000, endMs: next.endSec * 1000 } : null,
+        transient: !committed,
+      });
+      if (!committed) return;
+      // Moving the region by hand is the charter overriding the detector's alignment.
+      if (project.audio.detected && !project.audio.detected.overridden) {
+        dispatch({
+          type: 'setAudioDetection',
+          detected: { ...project.audio.detected, overridden: true },
+        });
+      }
+      if (next) {
+        setRegionSelecting(false);
         setMessage({
           kind: 'info',
-          text:
-            ms > 0
-              ? `${(ms / 1000).toFixed(2)}s of silence before the song. The export includes it.`
-              : 'Lead-in removed.',
+          text: `Charting ${formatTime(next.startSec)} – ${formatTime(next.endSec)} of the upload. Only that section is exported.`,
         });
       }
     },
-    [],
+    [project.audio.detected],
   );
+
+  /** Nudge the alignment by whole beats, for lining the grid up against the music by ear. */
+  const nudgeRegionStart = useCallback(
+    (beats: number) => {
+      const current = timelineRef.current;
+      const beatSec = 60 / Math.max(1, timing.bpmAt(0));
+      const startMs = Math.max(0, (current.regionStartSec + beats * beatSec) * 1000);
+      dispatch({
+        type: 'setAudioRegion',
+        region: { startMs, endMs: current.regionEndSec * 1000 },
+      });
+      if (project.audio.detected && !project.audio.detected.overridden) {
+        dispatch({
+          type: 'setAudioDetection',
+          detected: { ...project.audio.detected, overridden: true },
+        });
+      }
+    },
+    [project.audio.detected, timing],
+  );
+
+  const clearRegion = useCallback(() => {
+    dispatch({ type: 'setAudioRegion', region: null });
+    setRegionSelecting(false);
+  }, []);
 
   useEffect(() => {
     waveformRef.current?.setPlaybackRate(playbackRate);
@@ -620,22 +775,90 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
    *
    * The result is a SUGGESTION. Detection is unreliable on tempo-varying material and
    * on tracks with sparse percussion, and it frequently reports half or double the
-   * true tempo — so the UI presents it as a starting point the user confirms.
+   * true tempo — so the UI presents it with its confidence and the user confirms.
    */
-  const detectBpm = useCallback(async (): Promise<number | null> => {
+  const detectTempoNow = useCallback(async (): Promise<TempoGuess | null> => {
     const buffer = waveformRef.current?.getDecodedBuffer();
     if (!buffer) {
       throw new Error('Audio is still decoding — try again in a moment.');
     }
-    const { analyze } = await import('web-audio-beat-detector');
-    try {
-      return await analyze(buffer);
-    } catch {
-      // The library throws rather than returning a low-confidence guess when it
-      // cannot find a stable tempo. That is a real answer: report it as failure.
-      return null;
-    }
+    const { guess } = await import('web-audio-beat-detector');
+    const current = timelineRef.current;
+    // Analyse the charted region, not the whole upload: the tempo of the song you are
+    // charting is the question, not the tempo of the album side it came from.
+    return detectTempo(
+      buffer,
+      guess as GuessFn,
+      current.regionStartSec,
+      current.trimmed ? current.regionEndSec : undefined,
+    );
   }, []);
+
+  /**
+   * Apply a detection result: anchor BPM at tick 0, and the region start on the beat it
+   * found so bar 1 of the chart lands on bar 1 of the music.
+   *
+   * `alignRegion` is false when the charter asked for a tempo reading alone — re-aiming
+   * the region under someone who has already lined it up by ear would undo their work.
+   */
+  const applyTempoGuess = useCallback(
+    (result: TempoGuess, alignRegion: boolean) => {
+      dispatch({ type: 'upsertBpm', marker: { tick: 0, bpm: result.bpm } });
+      dispatch({
+        type: 'setAudioDetection',
+        detected: { ...result, overridden: false },
+      });
+      if (!alignRegion) return;
+
+      const beatsPerBar = timing.timeSignatureAt(0).numerator;
+      const startSec = regionStartForFirstBeat(result.firstBeatSec, result.bpm, beatsPerBar);
+      const endMs = timelineRef.current.trimmed
+        ? timelineRef.current.regionEndSec * 1000
+        : (project.audio.durationMs ?? 0);
+      dispatch({
+        type: 'setAudioRegion',
+        region: { startMs: startSec * 1000, endMs },
+      });
+    },
+    [dispatch, project.audio.durationMs, timing],
+  );
+
+  /**
+   * Detect the tempo ONCE, automatically, when a project arrives with nothing set.
+   *
+   * The old default was 120 BPM on every song, which is right for almost nothing and
+   * meant every chart began by fixing the tempo by hand. Running detection on first open
+   * makes the common case correct by default. It is deliberately conditional: an existing
+   * anchor, any notes, or a previous detection all mean someone has already made a
+   * decision here, and re-running would overwrite it.
+   */
+  const autoDetectedRef = useRef(false);
+  useEffect(() => {
+    if (autoDetectedRef.current) return;
+    if (project.audio.detected) return;
+    if (project.tracks.ExpertSingle.notes.length > 0) return;
+    if (audioDuration <= 0) return;
+    autoDetectedRef.current = true;
+
+    void (async () => {
+      try {
+        const result = await detectTempoNow();
+        if (!result) return;
+        applyTempoGuess(result, true);
+        setMessage({
+          kind: 'info',
+          text:
+            result.confidence >= 0.6
+              ? `Detected ${result.bpm} BPM and lined the song up to its first beat. Check it against the waveform.`
+              : `Detected ${result.bpm} BPM, but the reading was unsteady — check the tempo and the start point before charting.`,
+        });
+      } catch {
+        // Still decoding, or the browser refused. The Sync panel's button remains.
+        autoDetectedRef.current = false;
+      }
+    })();
+    // Runs on the transition to "audio is ready"; the ref makes it once-only regardless.
+  }, [audioDuration, applyTempoGuess, detectTempoNow, project.audio.detected, project.tracks.ExpertSingle.notes.length]);
 
   // ---- keyboard ----------------------------------------------------------------
 
@@ -643,6 +866,23 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
     () => project.tracks[trackName].notes.filter((n) => selection.has(n.id)),
     [project.tracks, trackName, selection],
   );
+
+  /**
+   * The chart check's headline number, for the Song tab's badge.
+   *
+   * Computed here rather than inside the panel so the count is visible without opening
+   * the tab — which is the trade the check made when it lost its own tab. A problem you
+   * have to go looking for is one you ship.
+   */
+  const chartIssues = useMemo(
+    // Measured against CHART time — lead-in plus region — not the source file's length.
+    // The upload may be far longer than the charted section, or shorter than chart time
+    // once a lead-in is added, and either way it is the wrong yardstick for "past the end".
+    () => validateChart(project, { durationMs: timeline.musicEndSec * 1000 }),
+    [project, timeline.musicEndSec],
+  );
+  const issueCount = chartIssues.length;
+  const hasErrors = useMemo(() => countBySeverity(chartIssues).errors > 0, [chartIssues]);
 
   /**
    * Star power is placed point to point: arm the tool, click where the phrase starts,
@@ -1103,7 +1343,7 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
       <TransportBar
         playing={playing}
         currentSeconds={displayTime}
-        durationSeconds={audioDuration + leadInSec}
+        durationSeconds={timeline.trimmed ? timeline.totalSec : audioDuration + leadInSec}
         snap={snap}
         onSnapChange={setSnap}
         zoom={highwayZoom}
@@ -1133,8 +1373,18 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
         onReady={setAudioDuration}
         onError={(text) => setMessage({ kind: 'error', text })}
         zoom={waveZoom}
-        leadingSilenceMs={project.meta.leadingSilenceMs}
-        onLeadingSilenceChange={handleLeadInChange}
+        leadInSec={timeline.leadInSec}
+        leadInLabel={describeLeadIn(project.meta.leadIn)}
+        region={
+          project.audio.region
+            ? {
+                startSec: project.audio.region.startMs / 1000,
+                endSec: project.audio.region.endMs / 1000,
+              }
+            : null
+        }
+        onRegionChange={handleRegionChange}
+        selecting={regionSelecting}
       />
 
       <div className="flex items-center gap-4 border-b border-edge bg-panel px-4">
@@ -1255,32 +1505,36 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
         <aside
           className={`${sidebarOpen ? 'flex w-72' : 'hidden'} shrink-0 flex-col border-l border-edge bg-panel`}
         >
+          {/*
+            Three tabs, not four. The chart check used to have its own, which meant a
+            surface you visit twice per project sat permanently alongside the two you use
+            constantly — and every tab costs a reading of the whole row. It now lives under
+            Song, with its issue count on the tab so a problem is still visible without
+            opening it. Nothing was removed; the check is one click from where it was.
+          */}
           <nav className="flex shrink-0 border-b border-edge">
-            {(['sections', 'song', 'sync', 'check'] as const).map((tab) => (
+            {(['sections', 'sync', 'song'] as const).map((tab) => (
               <button
                 key={tab}
                 type="button"
                 onClick={() => setSidebarTab(tab)}
                 className={`ch-tab flex-1 ${sidebarTab === tab ? 'ch-tab-active' : ''}`}
               >
-                {tab === 'sections'
-                  ? 'Chart'
-                  : tab === 'song'
-                    ? 'Song'
-                    : tab === 'sync'
-                      ? 'Sync'
-                      : 'Check'}
+                {tab === 'sections' ? 'Chart' : tab === 'sync' ? 'Sync' : 'Song'}
+                {tab === 'song' && issueCount > 0 && (
+                  <span
+                    className={`ml-1 font-mono ${hasErrors ? 'text-lane-red' : 'text-lane-orange'}`}
+                    title={`${issueCount} thing${issueCount === 1 ? '' : 's'} the chart check found`}
+                  >
+                    {issueCount}
+                  </span>
+                )}
               </button>
             ))}
           </nav>
 
           <div className="min-h-0 flex-1 overflow-y-auto">
-            {sidebarTab === 'check' ? (
-              <ChartCheckPanel
-                project={project}
-                onSeekToTick={(tick) => handleSeek(timing.tickToSec(tick))}
-              />
-            ) : sidebarTab === 'sections' ? (
+            {sidebarTab === 'sections' ? (
               <SectionsPanel
                 project={project}
                 trackName={trackName}
@@ -1289,24 +1543,48 @@ export default function EditorShell({ initialProject }: { initialProject: Projec
                 dispatch={dispatch}
                 onSeekToTick={(tick) => handleSeek(timing.tickToSec(tick))}
                 onSelectSection={handleSelectSection}
+                onSelectLanes={handleSelectLanes}
+                onCopySection={handleCopySection}
               />
             ) : sidebarTab === 'song' ? (
-              <SongPropertiesPanel
-                project={project}
-                dispatch={dispatch}
-                onAlbumChanged={(filename) =>
-                  setMessage({ kind: 'info', text: `Album art updated (${filename}).` })
-                }
-                onRequestReimport={() => setReimportOpen(true)}
-              />
+              <>
+                <SongPropertiesPanel
+                  project={project}
+                  dispatch={dispatch}
+                  onAlbumChanged={(filename) =>
+                    setMessage({ kind: 'info', text: `Album art updated (${filename}).` })
+                  }
+                  onRequestReimport={() => setReimportOpen(true)}
+                />
+                {/*
+                  Open by default when there is something to fix, closed when there is
+                  not. A clean check is worth knowing about but not worth scrolling past.
+                */}
+                <Disclosure
+                  label={issueCount > 0 ? `Chart check — ${issueCount}` : 'Chart check — clear'}
+                  defaultOpen={issueCount > 0}
+                >
+                  <ChartCheckPanel
+                    issues={chartIssues}
+                    onSeekToTick={(tick) => handleSeek(timing.tickToSec(tick))}
+                  />
+                </Disclosure>
+              </>
             ) : (
               <SyncPanel
                 project={project}
                 timing={timing}
+                timeline={timeline}
                 playheadTick={playheadTick}
                 dispatch={dispatch}
                 onSeekToTick={(tick) => handleSeek(timing.tickToSec(tick))}
-                onDetectBpm={detectBpm}
+                onDetectTempo={detectTempoNow}
+                onApplyTempo={applyTempoGuess}
+                onLeadInChange={handleLeadInChange}
+                onNudgeStart={nudgeRegionStart}
+                onStartRegionSelect={() => setRegionSelecting(true)}
+                onClearRegion={clearRegion}
+                regionSelecting={regionSelecting}
               />
             )}
           </div>

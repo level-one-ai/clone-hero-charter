@@ -3,6 +3,7 @@ import path from 'node:path';
 import { NextResponse } from 'next/server';
 import { detectOnsets, onsetsToNotes } from '@/lib/chart/autoChart';
 import { TimingMap } from '@/lib/chart/timing';
+import { buildAudioTimeline } from '@/lib/chart/audioTimeline';
 import { trackNameFor, type Difficulty, type TrackName } from '@/lib/chart/types';
 import { decodeToMono } from '@/lib/server/audio';
 import { isValidSongId, songDir } from '@/lib/server/paths';
@@ -69,13 +70,13 @@ export async function POST(request: Request, { params }: Params) {
   /**
    * Only decode the stretch being charted.
    *
-   * The lead-in shifts chart time relative to the audio file, so the window has to be
-   * converted back: audio seconds = chart seconds − lead-in. Getting this wrong would
-   * put every generated note out by exactly the lead-in.
+   * The lead-in and the region both shift chart time relative to the audio file, so the
+   * window has to be converted back through the same timeline the editor plays against.
+   * Getting this wrong would put every generated note out by exactly that shift.
    */
-  const leadInSec = (project.meta.leadingSilenceMs ?? 0) / 1000;
-  const fromSec = Math.max(0, timing.tickToSec(fromTick) - leadInSec);
-  const toSec = Math.max(fromSec, timing.tickToSec(toTick) - leadInSec);
+  const timeline = buildAudioTimeline(project, timing);
+  const fromSec = Math.max(0, timeline.chartToAudio(timing.tickToSec(fromTick)));
+  const toSec = Math.max(fromSec, timeline.chartToAudio(timing.tickToSec(toTick)));
 
   let audio;
   try {
@@ -95,9 +96,13 @@ export async function POST(request: Request, { params }: Params) {
     sensitivity: typeof body.sensitivity === 'number' ? body.sensitivity : undefined,
   });
 
-  // Onset times are relative to the decoded window, so shift them back into chart time.
+  // Onset times are relative to the decoded window, so shift them back into chart time
+  // through the same timeline the window was cut with.
   const candidates = onsetsToNotes(
-    onsets.map((onset) => ({ ...onset, timeSec: onset.timeSec + fromSec + leadInSec })),
+    onsets.map((onset) => ({
+      ...onset,
+      timeSec: timeline.audioToChart(onset.timeSec + fromSec),
+    })),
     (seconds) => timing.secToTick(seconds),
     {
       resolution: project.resolution,

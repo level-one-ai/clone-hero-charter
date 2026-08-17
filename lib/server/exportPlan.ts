@@ -8,9 +8,16 @@ import {
   hasFfmpeg,
   probeAudio,
   transcodeToFile,
+  type AudioShape,
   type ExportAudioFormat,
 } from '@/lib/server/audio';
 import { TMP_DIR } from '@/lib/server/paths';
+import { TimingMap } from '@/lib/chart/timing';
+import {
+  exportDurationMs,
+  leadInSeconds,
+  resolveRegion,
+} from '@/lib/chart/audioTimeline';
 import { writeMidi } from '@/lib/chart/writeMidi';
 import { writeChart } from '@/lib/chart/writeChart';
 import { exportFolderName, songDir, songFile } from '@/lib/server/paths';
@@ -48,7 +55,15 @@ export interface ExportPlan {
   /** True when the source file can be copied as-is, with no ffmpeg involved. */
   copyAudioVerbatim: boolean;
   canTranscode: boolean;
+  /** Silence prepended to the audio, derived from the lead-in bars at the anchor tempo. */
   leadingSilenceMs: number;
+  /** Silence appended after the region. */
+  trailingSilenceMs: number;
+  /** The slice of the source file to package. */
+  region: { startMs: number; endMs: number };
+  /** True when `region` is a real slice rather than the whole file. */
+  trimmed: boolean;
+  /** Lead-in + region + trailing. What song.ini reports as song_length. */
   durationMs: number;
   warnings: string[];
   /** Names as they appear inside the folder, in archive order. */
@@ -76,14 +91,28 @@ export async function planExport(
 
   // song_length must be accurate — Clone Hero uses it for the progress bar and for
   // deciding when the song ends. Re-measure rather than trusting a stale value.
-  let durationMs = project.audio.durationMs;
-  if (!durationMs || durationMs <= 0) {
-    durationMs = (await probeAudio(audioPath)).durationMs;
+  let sourceDurationMs = project.audio.durationMs;
+  if (!sourceDurationMs || sourceDurationMs <= 0) {
+    sourceDurationMs = (await probeAudio(audioPath)).durationMs;
   }
-  // Any lead-in silence is part of the packaged audio, so song_length has to include
-  // it or Clone Hero's progress bar and end-of-song detection are short by that much.
-  const leadingSilenceMs = Math.max(0, Math.round(project.meta.leadingSilenceMs ?? 0));
-  durationMs += leadingSilenceMs;
+
+  /**
+   * The packaged audio is lead-in silence, then the charted region, then trailing
+   * silence — the same three spans the editor plays, computed from the same helpers.
+   * That is what makes the export sound like the editor rather than merely close to it.
+   *
+   * The lead-in is derived from the tempo map, so it lands exactly on the barline the
+   * charter sees. Rounding to whole milliseconds happens once, here, and both the
+   * ffmpeg arguments and song_length are computed from the rounded value — rounding
+   * them separately is how a chart ends up a millisecond out from its own audio.
+   */
+  const timing = new TimingMap(project.sync.bpms, project.resolution, project.sync.timeSignatures);
+  const leadingSilenceMs = Math.round(leadInSeconds(project.meta.leadIn, timing) * 1000);
+  const trailingSilenceMs = Math.max(0, Math.round(project.meta.trailingSilenceMs ?? 0));
+  const region = resolveRegion({ ...project.audio, durationMs: sourceDurationMs });
+  const trimmed = region.startMs > 0 || region.endMs < sourceDurationMs - 1;
+  const regionMs = Math.max(0, region.endMs - region.startMs);
+  const durationMs = exportDurationMs(leadingSilenceMs, regionMs, trailingSilenceMs);
 
   const folderName = exportFolderName(project.meta);
   const audioExt = path.extname(project.audio.file).toLowerCase();
@@ -91,10 +120,13 @@ export async function planExport(
 
   /**
    * The audio can be copied byte-for-byte only when it is already the target format AND
-   * nothing has to be done to it. Any lead-in means re-encoding, since the silence has to
-   * be baked into the file.
+   * nothing has to be done to it: no lead-in to bake in, no region to cut, no tail to pad.
+   * With a 2-bar minimum lead-in this path is effectively never taken any more, but the
+   * condition is kept honest rather than hardcoded to false — the moment it is reachable
+   * again it should still work.
    */
-  const copyAudioVerbatim = audioExt === `.${audioFormat}` && leadingSilenceMs === 0;
+  const copyAudioVerbatim =
+    audioExt === `.${audioFormat}` && leadingSilenceMs === 0 && trailingSilenceMs === 0 && !trimmed;
   // Verified BEFORE the response starts streaming. Once the zip is on the wire the status
   // code is fixed, so a failure discovered later can only produce a corrupt download.
   const canTranscode = copyAudioVerbatim ? true : await canTranscodeTo(audioPath, audioFormat);
@@ -108,6 +140,11 @@ export async function planExport(
     if (leadingSilenceMs > 0) {
       warnings.push(
         'The lead-in silence also needs ffmpeg, so it cannot be added. The chart will be out of sync by that amount.',
+      );
+    }
+    if (trimmed) {
+      warnings.push(
+        'Trimming the audio to the selected region needs ffmpeg too, so the whole file will be packaged. The chart will not line up with it.',
       );
     }
   }
@@ -138,6 +175,9 @@ export async function planExport(
     copyAudioVerbatim,
     canTranscode,
     leadingSilenceMs,
+    trailingSilenceMs,
+    region,
+    trimmed,
     durationMs,
     warnings,
     files,
@@ -209,7 +249,7 @@ export async function prepareExportAudio(
 
   await fsp.mkdir(TMP_DIR, { recursive: true });
   const scratch = path.join(TMP_DIR, `export-${id}-${Date.now()}.${plan.audioFormat}`);
-  await transcodeToFile(plan.audioPath, scratch, plan.audioFormat, plan.leadingSilenceMs);
+  await transcodeToFile(plan.audioPath, scratch, plan.audioFormat, audioShapeOf(plan));
 
   return {
     stream: fs.createReadStream(scratch),
@@ -221,6 +261,39 @@ export async function prepareExportAudio(
       }
     },
   };
+}
+
+/**
+ * The plan's audio shaping, in the form ffmpeg needs it.
+ *
+ * One function so the zip export, the single-file download and any future consumer cut,
+ * pad and delay identically. Two exports of the same song that differ by a millisecond
+ * because one of them rebuilt these numbers itself is exactly the failure mode this
+ * avoids.
+ */
+export function audioShapeOf(plan: ExportPlan): AudioShape {
+  return {
+    leadingSilenceMs: plan.leadingSilenceMs,
+    trailingSilenceMs: plan.trailingSilenceMs,
+    startMs: plan.trimmed ? plan.region.startMs : 0,
+    endMs: plan.trimmed ? plan.region.endMs : null,
+  };
+}
+
+/**
+ * song.ini for a plan.
+ *
+ * Both export routes call this rather than each building the options themselves. They used
+ * to, and they disagreed: the zip omitted the music duration, so the same chart downloaded
+ * as an archive and file-by-file carried different `diff_guitar` values.
+ */
+export function songIniFor(plan: ExportPlan): string {
+  return generateSongIni(exportProjectFor(plan), {
+    durationMs: plan.durationMs,
+    // The music alone, so the difficulty estimate is notes per second of PLAYING rather
+    // than notes per second of a file that is partly silence and partly unused audio.
+    musicDurationMs: Math.max(0, plan.region.endMs - plan.region.startMs),
+  });
 }
 
 /** What a single requested filename resolves to. */
@@ -265,7 +338,7 @@ export function resolveExportFile(
   if (name === 'song.ini') {
     return {
       kind: 'text',
-      body: generateSongIni(exportProjectFor(plan), { durationMs: plan.durationMs }),
+      body: songIniFor(plan),
       contentType: 'text/plain; charset=utf-8',
     };
   }

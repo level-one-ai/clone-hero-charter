@@ -6,6 +6,9 @@ import { convertParsedMidi, type ParsedMidi } from '@/lib/chart/midiToChart';
 import { TRACK_NAMES, type Track } from '@/lib/chart/types';
 import { isValidSongId, songDir } from '@/lib/server/paths';
 import { readProject, saveProject } from '@/lib/server/storage';
+import { shiftImport } from '@/lib/chart/alignImport';
+import { leadInTicks } from '@/lib/chart/audioTimeline';
+import { TimingMap } from '@/lib/chart/timing';
 import { isGuitarProExtension, parseGuitarPro } from '@/lib/server/guitarPro';
 import { mergeTracksIntoGaps } from '@/lib/server/mergeNotes';
 import { commitUploadedFile, extensionOf, parseMultipart, CHART_EXTENSIONS } from '@/lib/server/upload';
@@ -51,6 +54,9 @@ export async function POST(request: Request, { params }: Params) {
   // already charted rather than being layered on top a fraction out of step.
   const windowTicks = Math.max(1, Math.round(project.resolution / 2));
 
+  // The grid the incoming notes are joining.
+  const timing = new TimingMap(project.sync.bpms, project.resolution, project.sync.timeSignatures);
+
   let tracks: Record<string, Track> = { ...project.tracks };
   let added = 0;
   let skipped = 0;
@@ -85,7 +91,16 @@ export async function POST(request: Request, { params }: Params) {
         ...(musical ? { mode: 'musical' as const } : {}),
       });
 
-      const result = mergeTracksIntoGaps(tracks, converted.project.tracks, { windowTicks });
+      /**
+       * Move the incoming notes past the lead-in before merging.
+       *
+       * Measured against THIS project's tempo map rather than the incoming file's: the
+       * notes are joining an existing grid, and a merged file whose own tempo differs
+       * would otherwise land a whole count-in away from where it belongs.
+       */
+      const aligned = shiftImport(converted.project, leadInTicks(project.meta.leadIn, timing));
+
+      const result = mergeTracksIntoGaps(tracks, aligned.tracks, { windowTicks });
       tracks = result.tracks;
       added += result.added;
       skipped += result.skipped;

@@ -4,6 +4,7 @@ import { useEffect, useRef } from 'react';
 import { LANE_COLORS, type Note, type Project, type TrackName } from '../chart/types';
 import { TimingMap } from '../chart/timing';
 import type { SnapDivision } from '../chart/snap';
+import { isNaturalHopo } from '../chart/noteTypes';
 
 /**
  * Note-highway canvas renderer, styled after Moonscraper.
@@ -356,27 +357,16 @@ export function isHopo(notes: Note[], index: number, threshold: number): boolean
   const note = notes[index];
   if (note.lane === 7) return note.forced; // open notes have no natural HOPO status
 
-  // Chord test: any neighbour sharing this tick. The array is tick-sorted, so
-  // neighbours are adjacent.
-  const isChord =
-    (index > 0 && notes[index - 1].tick === note.tick) ||
-    (index + 1 < notes.length && notes[index + 1].tick === note.tick);
-
-  let natural = false;
-  if (!isChord) {
-    // Walk back past any notes sharing the previous tick to find the real predecessor.
-    let previousIndex = index - 1;
-    while (previousIndex >= 0 && notes[previousIndex].tick === note.tick) previousIndex -= 1;
-    if (previousIndex >= 0) {
-      const previous = notes[previousIndex];
-      const previousIsChord =
-        previousIndex > 0 && notes[previousIndex - 1].tick === previous.tick;
-      const gap = note.tick - previous.tick;
-      natural =
-        gap > 0 && gap <= threshold && (previousIsChord || previous.lane !== note.lane);
-    }
-  }
-
+  /**
+   * The derivation itself lives in lib/chart/noteTypes.ts and is shared with the
+   * conversion tools. It used to be duplicated here, and the two copies disagreed about a
+   * note following a chord — so "make this a hammer-on" set `forced` against one rule
+   * while the highway drew the note against the other, and the note rendered as a strum.
+   *
+   * The threshold is passed in as ticks and converted back to the resolution the shared
+   * function expects, so the two cannot drift apart again.
+   */
+  const natural = isNaturalHopo(notes, index, threshold * HOPO_THRESHOLD_DIVISOR);
   return note.forced ? !natural : natural;
 }
 
@@ -651,8 +641,9 @@ export function laneGlow(
   notes: RenderNote[],
   timing: TimingMap,
   timeSeconds: number,
-): number[] {
+): LaneGlow {
   const glow = [0, 0, 0, 0, 0];
+  let open = 0;
 
   for (const item of notes) {
     const start = timing.tickToSec(item.tick);
@@ -666,18 +657,29 @@ export function laneGlow(
     }
     if (intensity <= 0) continue;
 
-    // An open note is the whole fretboard, so every button lights — but dimmer, because
-    // no single fret is being pressed.
+    /**
+     * An open note is tracked SEPARATELY rather than lighting all five lanes.
+     *
+     * It used to raise every lane's glow to 70%, which drew as five colours brightening
+     * at once — indistinguishable at a glance from a five-note chord, and saying nothing
+     * about which note actually crossed the line. Kept apart, the buttons can flood purple
+     * instead, which is unambiguous: purple is the open note's colour everywhere else in
+     * the editor, and no fret note can produce it.
+     */
     if (item.lane === 7) {
-      for (let lane = 0; lane < 5; lane += 1) {
-        glow[lane] = Math.max(glow[lane], intensity * 0.7);
-      }
+      open = Math.max(open, intensity);
     } else if (item.lane >= 0 && item.lane <= 4) {
       glow[item.lane] = Math.max(glow[item.lane], intensity);
     }
   }
 
-  return glow;
+  return { lanes: glow, open };
+}
+
+/** Per-lane fret-button glow, plus the open-note glow that overrides all five. */
+export interface LaneGlow {
+  lanes: number[];
+  open: number;
 }
 
 /**
@@ -691,15 +693,25 @@ function drawFretButtons(
   ctx: CanvasRenderingContext2D,
   originX: number,
   strikeY: number,
-  glow: number[],
+  glow: LaneGlow,
 ): void {
   const w = HIGHWAY.laneWidth - 18;
   const h = HIGHWAY.noteHeight;
 
   for (let lane = 0; lane < 5; lane += 1) {
     const centerX = originX + lane * HIGHWAY.laneWidth + HIGHWAY.laneWidth / 2;
-    const color = LANE_COLORS[lane];
-    const lit = glow[lane] ?? 0;
+    /**
+     * An open note crossing the line turns the whole row PURPLE.
+     *
+     * That is the registration signal: purple is the open note's colour throughout the
+     * editor, and no combination of fret notes can produce it, so a purple row means
+     * "the open note landed" and nothing else. It overrides the lane colour outright
+     * rather than blending, because a blend of five lane colours with purple reads as
+     * mud at the speed this is actually watched.
+     */
+    const openLit = glow.open;
+    const color = openLit > 0 ? LANE_COLORS[7] : LANE_COLORS[lane];
+    const lit = Math.max(glow.lanes[lane] ?? 0, openLit);
 
     const x = centerX - w / 2;
     const top = strikeY - h / 2;
@@ -729,6 +741,19 @@ function drawFretButtons(
   ctx.lineWidth = 1;
 }
 
+/**
+ * The strike line — now only the stubs OUTSIDE the fret buttons.
+ *
+ * A white rule used to run the full width of the highway, straight across all five
+ * buttons. It sat on top of every gem at the moment of the hit, which is the one moment
+ * the gem most needs to be readable, and it competed with the open note (a bar in the
+ * same place, in the same orientation) badly enough that the two were hard to tell apart.
+ *
+ * The buttons themselves already mark where the line is; they are the row of five, and
+ * their tops and bottoms define it more clearly than a stroke through them. So the line is
+ * kept only as short stubs at either edge, which give the eye the horizontal it needs to
+ * judge approach without putting anything over the notes.
+ */
 function drawStrikeLine(
   ctx: CanvasRenderingContext2D,
   originX: number,
@@ -737,9 +762,12 @@ function drawStrikeLine(
 ): void {
   ctx.strokeStyle = COLORS.strikeLine;
   ctx.lineWidth = 2;
+  const stub = 14;
   ctx.beginPath();
-  ctx.moveTo(originX - 14, strikeY);
-  ctx.lineTo(originX + highwayWidth + 14, strikeY);
+  ctx.moveTo(originX - stub, strikeY);
+  ctx.lineTo(originX + 2, strikeY);
+  ctx.moveTo(originX + highwayWidth - 2, strikeY);
+  ctx.lineTo(originX + highwayWidth + stub, strikeY);
   ctx.stroke();
   ctx.lineWidth = 1;
 }
@@ -863,7 +891,15 @@ function drawHopoGem(
   gemOutline(ctx, x, top, w, h, radius, color, item);
 }
 
-/** Tap note: a long thin bar with no raised head — the GH "no strum at all" shape. */
+/**
+ * Tap note: a wide, flat bar — the GH "no strum at all" shape.
+ *
+ * Three silhouettes have to be separable at scroll speed, and the tap is the one most
+ * easily confused with the HOPO, since both are smaller than a strum gem. So they differ
+ * along two axes at once: the HOPO is NARROW and TALL with a vertical core, the tap is
+ * WIDE and FLAT with a horizontal one. Even at a glance, the direction of the white mark
+ * inside the gem tells them apart.
+ */
 function drawTapGem(
   ctx: CanvasRenderingContext2D,
   centerX: number,
@@ -872,18 +908,27 @@ function drawTapGem(
   item: RenderNote,
   isHit: boolean,
 ): void {
-  const w = HIGHWAY.laneWidth - 12;
-  const h = 9;
+  const w = HIGHWAY.laneWidth - 8;
+  const h = 8;
   const x = centerX - w / 2;
   const top = y - h / 2;
 
   gemBody(ctx, x, top, w, h, 4, color, isHit);
-  ctx.fillStyle = withAlpha('#ffffff', 0.55);
-  ctx.fillRect(x + 4, y - 1, w - 8, 2);
+  // Full-width bright bar: the horizontal counterpart to the HOPO's vertical core.
+  ctx.fillStyle = withAlpha('#ffffff', isHit ? 0.95 : 0.75);
+  ctx.fillRect(x + 3, y - 1.5, w - 6, 3);
   gemOutline(ctx, x, top, w, h, 4, color, item);
 }
 
-/** Open note: a bar across the whole highway. */
+/**
+ * Open note: a bar across the whole highway, lit around its edges.
+ *
+ * The glow is not decoration. An open note is a rectangle spanning the highway, and so is
+ * a barline, a star-power boundary and — before this change — the strike line. Flat, it
+ * was one horizontal among several. The outer bloom in its own purple gives it depth
+ * nothing else on the highway has, so it reads as a note at a glance rather than as
+ * another piece of grid.
+ */
 function drawOpenNote(
   ctx: CanvasRenderingContext2D,
   originX: number,
@@ -897,7 +942,25 @@ function drawOpenNote(
   const w = HIGHWAY.width - 6;
   const top = y - h / 2;
 
+  // Bloom first, underneath the body, so the body's own edges stay crisp on top of it.
+  ctx.save();
+  ctx.shadowColor = color;
+  ctx.shadowBlur = isHit ? 22 : 12;
+  ctx.globalAlpha = isHit ? 0.95 : 0.6;
+  roundRect(ctx, x, top, w, h, 3);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.restore();
+
   gemBody(ctx, x, top, w, h, 3, color, isHit);
+
+  // A brighter inner rim, which is what makes the edge itself look lit rather than
+  // merely surrounded by light.
+  roundRect(ctx, x + 1.5, top + 1.5, w - 3, h - 3, 2);
+  ctx.strokeStyle = withAlpha('#ffffff', isHit ? 0.85 : 0.45);
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
   gemOutline(ctx, x, top, w, h, 3, color, item);
 }
 

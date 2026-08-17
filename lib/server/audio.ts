@@ -185,41 +185,115 @@ export async function canTranscodeTo(
  *
  * -q:a 5 is ~160kbps VBR, the quality level the Clone Hero community uses for customs.
  */
-export function spawnOggTranscode(inputPath: string, leadingSilenceMs = 0) {
+export function spawnOggTranscode(inputPath: string, shape: AudioShape = NO_SHAPING) {
   return spawn(
     'ffmpeg',
-    [
-      '-hide_banner',
-      '-loglevel',
-      'error',
-      ...transcodeArgs(inputPath, leadingSilenceMs, 'ogg', 'pipe:1'),
-    ],
+    ['-hide_banner', '-loglevel', 'error', ...transcodeArgs(inputPath, shape, 'ogg', 'pipe:1')],
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
 }
 
 /**
- * ffmpeg arguments for the export transcode, optionally prepending silence.
+ * How the exported audio differs from the uploaded file: a slice of it, with silence
+ * before and after.
  *
- * `adelay` shifts the audio later within the same stream rather than concatenating a
- * separate silent file, which avoids any sample-rate or channel-layout mismatch
- * between the two. `all=1` applies the delay to every channel — without it only the
- * first channel is delayed and the result is audibly out of phase.
+ * All four numbers are in milliseconds of the SOURCE file's timeline, and all four are
+ * already rounded by the caller. Rounding here as well would let the packaged audio and
+ * song.ini's song_length disagree by a millisecond, which is the kind of drift that is
+ * impossible to find by ear and trivial to avoid by construction.
  */
-function transcodeArgs(
+export interface AudioShape {
+  leadingSilenceMs: number;
+  trailingSilenceMs: number;
+  /** Where to start reading the source file. */
+  startMs: number;
+  /** Where to stop, or null to read to the end. */
+  endMs: number | null;
+}
+
+export const NO_SHAPING: AudioShape = {
+  leadingSilenceMs: 0,
+  trailingSilenceMs: 0,
+  startMs: 0,
+  endMs: null,
+};
+
+/**
+ * ffmpeg arguments for the export transcode: cut the region, prepend the lead-in, append
+ * the tail.
+ *
+ * ALL THREE OPERATIONS ARE FILTERS, IN ONE CHAIN, IN THIS ORDER. That is not a style
+ * preference — the two obvious alternatives are both wrong, and both were measured rather
+ * than reasoned about:
+ *
+ *   - `-ss`/`-to` placed AFTER `-i` are OUTPUT options, which ffmpeg implements as a trim
+ *     appended to the END of the filter chain. They therefore cut the already-delayed and
+ *     padded stream: the lead-in silence is eaten and the music starts early. Asking for a
+ *     30s region with 4s of lead-in and 1s of tail produced a 30s file with no silence at
+ *     either end.
+ *   - `-ss`/`-t` placed BEFORE `-i` are input options and do give the right length, but
+ *     they seek. On a compressed source the seek lands on a frame boundary: an MP3 cut at
+ *     60s started its music 10.6ms late. That is a fixed offset between chart and music for
+ *     the whole song — exactly the failure a region is supposed not to have.
+ *
+ * `atrim` inside the chain cuts at the exact sample on both WAV and MP3. It costs a decode
+ * from the start of the file rather than a seek, which for a song-length upload is a cheap
+ * price for being right.
+ *
+ * `asetpts` after the trim rebases timestamps to zero. Without it the trimmed audio keeps
+ * its original presentation times and `adelay` adds the lead-in on top of those, leaving
+ * the region's own start offset in the output as well.
+ *
+ * `all=1` on adelay applies the delay to every channel — without it only the first channel
+ * moves and the result is audibly out of phase.
+ */
+export function transcodeArgs(
   inputPath: string,
-  leadingSilenceMs: number,
+  shape: AudioShape,
   format: ExportAudioFormat,
   destination: string,
 ): string[] {
   const args = ['-i', inputPath, '-vn']; // -vn drops embedded art, which would break the file
-  if (leadingSilenceMs > 0) {
-    args.push('-af', `adelay=${Math.round(leadingSilenceMs)}:all=1`);
-  }
+
+  const filters = shapeFilters(shape);
+  if (filters.length > 0) args.push('-af', filters.join(','));
+
   args.push(...CODEC[format], '-f', format);
   if (destination !== 'pipe:1') args.push('-y');
   args.push(destination);
   return args;
+}
+
+/**
+ * The filter chain for a shape: trim, rebase, delay, pad — in that order, always.
+ *
+ * Shared by the transcode and the keep-original-codec path so the two cannot drift apart.
+ * An export that is correct as WAV and wrong as OGG would be a miserable thing to find.
+ */
+export function shapeFilters(shape: AudioShape): string[] {
+  const filters: string[] = [];
+
+  const hasEnd = shape.endMs !== null && shape.endMs > shape.startMs;
+  if (shape.startMs > 0 || hasEnd) {
+    const parts = [`start=${msToTimestamp(shape.startMs)}`];
+    if (hasEnd) parts.push(`end=${msToTimestamp(shape.endMs as number)}`);
+    filters.push(`atrim=${parts.join(':')}`);
+    filters.push('asetpts=N/SR/TB');
+  }
+
+  if (shape.leadingSilenceMs > 0) {
+    filters.push(`adelay=${Math.round(shape.leadingSilenceMs)}:all=1`);
+  }
+  if (shape.trailingSilenceMs > 0) {
+    filters.push(`apad=pad_dur=${(shape.trailingSilenceMs / 1000).toFixed(3)}`);
+  }
+
+  return filters;
+}
+
+/** Milliseconds as an ffmpeg timestamp, at millisecond precision. */
+function msToTimestamp(ms: number): string {
+  return (Math.max(0, ms) / 1000).toFixed(3);
 }
 
 /**
@@ -235,39 +309,31 @@ export async function transcodeToFile(
   inputPath: string,
   outputPath: string,
   format: ExportAudioFormat,
-  leadingSilenceMs = 0,
+  shape: AudioShape = NO_SHAPING,
 ): Promise<void> {
   await run('ffmpeg', [
     '-hide_banner',
     '-loglevel',
     'error',
-    ...transcodeArgs(inputPath, leadingSilenceMs, format, outputPath),
+    ...transcodeArgs(inputPath, shape, format, outputPath),
   ]);
 }
 
 /**
- * Prepend silence to an audio file without transcoding to OGG, for the
+ * Shape an audio file — cut, delay, pad — without changing its codec, for the
  * keep-original-audio export path. Returns the child process so the caller can pipe
  * stdout into the archive.
  */
-export function spawnSilencePad(inputPath: string, leadingSilenceMs: number, format: string) {
-  return spawn(
-    'ffmpeg',
-    [
-      '-hide_banner',
-      '-loglevel',
-      'error',
-      '-i',
-      inputPath,
-      '-vn',
-      '-af',
-      `adelay=${Math.round(leadingSilenceMs)}:all=1`,
-      '-f',
-      format,
-      'pipe:1',
-    ],
-    { stdio: ['ignore', 'pipe', 'pipe'] },
-  );
+export function spawnSilencePad(inputPath: string, shape: AudioShape, format: string) {
+  const args = ['-i', inputPath, '-vn'];
+  // Same chain as the transcode, for the same reasons — see transcodeArgs.
+  const filters = shapeFilters(shape);
+  if (filters.length > 0) args.push('-af', filters.join(','));
+  args.push('-f', format, 'pipe:1');
+
+  return spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', ...args], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
 }
 
 function run(command: string, args: string[]): Promise<string> {

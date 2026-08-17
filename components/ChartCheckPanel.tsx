@@ -1,8 +1,7 @@
 'use client';
 
 import { useMemo } from 'react';
-import { countBySeverity, validateChart, type ChartIssue } from '@/lib/chart/validateChart';
-import type { Project } from '@/lib/chart/types';
+import { countBySeverity, type ChartIssue } from '@/lib/chart/validateChart';
 
 /**
  * The chart check.
@@ -15,16 +14,21 @@ import type { Project } from '@/lib/chart/types';
  */
 
 interface Props {
-  project: Project;
+  /**
+   * The issues, already computed.
+   *
+   * Passed in rather than derived here so the panel and the tab badge can never disagree,
+   * and — more importantly — so there is exactly one place that decides what "the end of
+   * the audio" means. This panel used to run the check itself against the source file's
+   * length, which with a lead-in or a charted region is the wrong yardstick in both
+   * directions: it flagged perfectly good notes and missed genuinely unreachable ones.
+   */
+  issues: ChartIssue[];
   onSeekToTick: (tick: number) => void;
 }
 
-export default function ChartCheckPanel({ project, onSeekToTick }: Props) {
-  const issues = useMemo(
-    () => validateChart(project, { durationMs: project.audio.durationMs }),
-    [project],
-  );
-  const { errors, warnings } = countBySeverity(issues);
+export default function ChartCheckPanel({ issues, onSeekToTick }: Props) {
+  const { errors, warnings } = useMemo(() => countBySeverity(issues), [issues]);
 
   return (
     <div className="flex h-full flex-col">

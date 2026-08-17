@@ -10,6 +10,7 @@ import {
 } from '@/lib/chart/midiToChart';
 import { isGuitarProExtension, parseGuitarPro } from '@/lib/server/guitarPro';
 import { parseChart } from '@/lib/chart/parseChart';
+import { alignImportToLeadIn } from '@/lib/chart/alignImport';
 import { probeAudio } from '@/lib/server/audio';
 import { songDir } from '@/lib/server/paths';
 import { newSongId, readIndex, saveProject, sweepTmp } from '@/lib/server/storage';
@@ -183,6 +184,17 @@ export async function POST(request: Request) {
     project.meta.year = year;
     project.meta.charter = (fields.charter ?? '').trim();
 
+    /**
+     * Slide the import in behind the lead-in.
+     *
+     * Applied to every source, including .chart. For a score — Guitar Pro or a
+     * transcription MIDI — this is what puts bar 1 of the music on bar 1 of the chart
+     * instead of inside the count-in. For a .chart it PRESERVES sync rather than
+     * establishing it: the notes move later by the lead-in and the audio gains exactly
+     * that much silence in front, so what lined up before still lines up.
+     */
+    project = alignImportToLeadIn(project, project.meta.leadIn);
+
     // ---- commit files to the project folder -------------------------------------
     const dir = songDir(id);
     await fs.mkdir(dir, { recursive: true });
@@ -195,6 +207,10 @@ export async function POST(request: Request) {
       file: audioName,
       durationMs: probe.durationMs,
       sampleRate: probe.sampleRate,
+      // The whole file, until the charter picks a section; and no tempo reading yet —
+      // detection runs in the browser on first open, where the decoded audio already is.
+      region: null,
+      detected: null,
     };
     if (probe.durationMs <= 0) {
       warnings.push(

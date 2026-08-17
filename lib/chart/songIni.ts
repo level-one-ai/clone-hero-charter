@@ -12,8 +12,20 @@ import { TRACK_NAMES, type Project } from './types';
  */
 
 export interface SongIniOptions {
-  /** Audio duration in milliseconds, measured from the actual audio file. */
+  /**
+   * Length of the PACKAGED audio in milliseconds — lead-in, music and tail together.
+   * This is what `song_length` reports, so it has to describe the file that ships rather
+   * than the file that was uploaded.
+   */
   durationMs: number;
+  /**
+   * Length of the music alone, for the difficulty estimate. Defaults to `durationMs`.
+   *
+   * These differ whenever a section is charted out of a longer upload. The estimate is
+   * notes per second, so measuring against the whole upload rates a dense 30-second
+   * breakdown cut from a five-minute recording as if it were nearly empty.
+   */
+  musicDurationMs?: number;
   /** Filename of the audio as packaged in the zip, used to derive nothing but kept for clarity. */
   audioFileName?: string;
 }
@@ -47,7 +59,7 @@ export function generateSongIni(project: Project, options: SongIniOptions): stri
   // Per-difficulty ratings, 0-6 in Clone Hero, or -1 for "not charted". We derive a
   // rough number from note density rather than leaving everything at -1, because an
   // all -1 song sorts oddly in the browser. This is a hint, not a claim of accuracy.
-  push('diff_guitar', estimateDifficulty(project));
+  push('diff_guitar', estimateDifficulty(project, options.musicDurationMs ?? options.durationMs));
 
   // Instruments we do not chart must be explicitly -1 or Clone Hero shows them as
   // available and then fails to load them.
@@ -72,13 +84,13 @@ export function generateSongIni(project: Project, options: SongIniOptions): stri
  * Estimate a 0-6 difficulty rating from Expert note density (notes per second).
  * Thresholds are eyeballed against real charts — this is cosmetic metadata.
  */
-function estimateDifficulty(project: Project): number {
+function estimateDifficulty(project: Project, musicDurationMs: number): number {
   const expert = project.tracks.ExpertSingle;
   const fallback = TRACK_NAMES.map((t) => project.tracks[t]).find((t) => t && t.notes.length > 0);
   const track = expert && expert.notes.length > 0 ? expert : fallback;
   if (!track || track.notes.length === 0) return -1;
 
-  const seconds = project.audio.durationMs / 1000;
+  const seconds = musicDurationMs / 1000;
   if (!Number.isFinite(seconds) || seconds <= 0) return -1;
 
   const density = track.notes.length / seconds;
